@@ -1,0 +1,6 @@
+{
+  "name": "@plasmo-static-common",
+  "version": "0.1.0",
+  "description": "STUB — Plasmo 0.86.3 scaffold imports this but it's not in npm; replace with real package when network is OK",
+  "main": "react/index.js"
+}

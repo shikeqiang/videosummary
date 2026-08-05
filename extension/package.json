@@ -1,0 +1,60 @@
+{
+  "name": "youtube-ai-summary-extension",
+  "display": "YouTube AI Summary",
+  "version": "1.0.0",
+  "description": "Get instant AI summaries of any YouTube video",
+  "author": "TODO-REPLACE-WITH-YOUR-NAME-OR-STUDIO",
+  "scripts": {
+    "dev": "plasmo dev",
+    "build": "plasmo build",
+    "package": "plasmo package",
+    "dev:firefox": "plasmo dev --target=firefox-mv2",
+    "dev:edge": "plasmo dev --target=edge-mv3"
+  },
+  "dependencies": {
+    "plasmo": "^0.86.0",
+    "react": "18.2.0",
+    "react-dom": "18.2.0",
+    "@plasmohq/messaging": "^0.6.0",
+    "@plasmohq/storage": "1.7.2",
+    "@supabase/supabase-js": "^2.45.0",
+    "lucide-react": "0.344.0",
+    "clsx": "2.1.1",
+    "tailwind-merge": "2.2.2"
+  },
+  "devDependencies": {
+    "@types/chrome": "0.0.246",
+    "@types/node": "20.11.20",
+    "@types/react": "18.2.60",
+    "@types/react-dom": "18.2.19",
+    "autoprefixer": "10.4.18",
+    "postcss": "8.4.36",
+    "prettier": "3.2.4",
+    "tailwindcss": "3.4.1",
+    "typescript": "5.3.3"
+  },
+  "manifest": {
+    "host_permissions": [
+      "https://www.youtube.com/*",
+      "https://api.supabase.co/*",
+      "https://*.supabase.co/*",
+      "https://api.lemonsqueezy.com/*"
+    ],
+    "permissions": [
+      "tabs",
+      "storage",
+      "activeTab"
+    ],
+    "web_accessible_resources": [
+      {
+        "resources": [
+          "*.css",
+          "*.png"
+        ],
+        "matches": [
+          "https://www.youtube.com/*"
+        ]
+      }
+    ]
+  }
+}

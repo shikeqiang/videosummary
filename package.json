@@ -1,0 +1,15 @@
+{
+  "name": "youtube-ai-summary-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "YouTube AI Summary Chrome Extension + Next.js API",
+  "scripts": {
+    "dev:ext": "cd extension && npm run dev",
+    "dev:api": "cd api && npm run dev",
+    "build:ext": "cd extension && npm run build",
+    "build:api": "cd api && npm run build"
+  },
+  "keywords": ["chrome-extension", "youtube", "ai", "summary"],
+  "author": "",
+  "license": "MIT"
+}

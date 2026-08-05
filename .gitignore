@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+.yarn/install-state.gz
+
+# Testing
+coverage/
+.nyc_output/
+
+# Next.js
+.next/
+out/
+api/.next/
+
+# Production
+build/
+dist/
+
+# Environment
+.env
+.env*.local
+.env.development
+.env.production
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# Misc
+.DS_Store
+*.pem
+.vscode/
+.idea/
+
+# Plasmo
+.plasmo/
+
+# Local supabase
+supabase/.branches
+supabase/.temp
+
+# ---- additional safety (already covered by patterns above but explicit) ----
+api/.env*.local
+api/.env.local
+extension/.env*.local
+extension/.env.production
+
+# ---- generated build artifacts (safety net) ----
+dist/
+dist/**
