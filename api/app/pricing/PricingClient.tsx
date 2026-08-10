@@ -169,6 +169,7 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
       setBusyTier(tier.slug)
       try {
         const email = emailInput.trim()
+        console.log("[pricing-debug] emailInput state:", JSON.stringify(emailInput), "  email after trim:", JSON.stringify(email))
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
           setBootError("Please enter a valid email before subscribing.")
           // 滚动并 focus 到 email 输入框
