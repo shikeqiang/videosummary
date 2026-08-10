@@ -1,128 +1,74 @@
-"use client"
-
+import { headers } from "next/headers"
 import Link from "next/link"
-import { Sparkles, Check, Crown, Loader2 } from "lucide-react"
-import { useState } from "react"
+import { Sparkles } from "lucide-react"
+import PricingClient from "./PricingClient"
 
 /**
- * Pricing 页面。
+ * Pricing 页（server component）
  *
- * 订阅流程：
- *   - 浏览器没有登录态（marketing 站不做 cookie session），
- *     "Subscribe" 按钮会引导用户先去安装扩展。
- *   - 已安装扩展的用户在扩展里 sign-in 后会自动跳到 checkout，
- *     本页面的按钮只是 fallback。
+ * 职责：
+ *   1. 从请求头推断访客国家（Vercel / Netlify / Cloudflare 通用）。
+ *      推断不到时返回 null → 客户端不会把它传给 Paddle，
+ *      让 Paddle.PricePreview 按浏览器 IP 自动判断。
+ *   2. 把 country 作为 prop 传给 client component。
+ *
+ * 不在这里做任何客户端 SDK 调用，避免泄漏 PADDLE_API_KEY。
  */
 
-// Chrome Web Store 链接 — 部署前在 api/.env.local 里设 NEXT_PUBLIC_CHROME_STORE_URL
-// 例: https://chrome.google.com/webstore/detail/your-extension-name/abcdefghijklmnop
-const CHROME_STORE_URL =
-  process.env.NEXT_PUBLIC_CHROME_STORE_URL ||
-  "https://chrome.google.com/webstore/detail/PLACEHOLDER"
+export const dynamic = "force-dynamic"
 
-export default function PricingPage() {
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+const COUNTRY_HEADERS = [
+  "x-vercel-ip-country",
+  "x-nf-geo-country",
+  "x-country-code",
+  "cf-ipcountry",
+  "x-geo-country",
+  "x-country",
+  "x-appengine-country"
+] as const
 
-  async function handleSubscribe() {
-    setError(null)
-    setBusy(true)
-    try {
-      // 尝试拿当前浏览器里可能存在的 Supabase session（localStorage）
-      const stored = typeof window !== "undefined" ? window.localStorage.getItem("sb-access-token") : null
-      const headers: Record<string, string> = { "Content-Type": "application/json" }
-      if (stored) headers["Authorization"] = `Bearer ${stored}`
-
-      const res = await fetch("/api/checkout", { method: "POST", headers })
-
-      if (res.status === 401) {
-        // 用户没在扩展里登录 → 引导安装
-        window.location.href = CHROME_STORE_URL
-        return
-      }
-
-      const json = await res.json().catch(() => ({}))
-      if (!res.ok || !json?.url) {
-        throw new Error(json?.error ?? `HTTP ${res.status}`)
-      }
-
-      window.location.href = json.url
-    } catch (e: any) {
-      setError(e?.message ?? "Checkout failed. Please try again or install the extension first.")
-    } finally {
-      setBusy(false)
+function detectCountry(): string | null {
+  let h: Headers
+  try {
+    h = headers()
+  } catch {
+    return null
+  }
+  for (const k of COUNTRY_HEADERS) {
+    const v = h.get(k)
+    if (typeof v === "string" && v.length === 2) {
+      const up = v.toUpperCase()
+      if (/^[A-Z]{2}$/.test(up) && up !== "ZZ" && up !== "XX") return up
     }
   }
+  return null
+}
+
+export default function PricingPage() {
+  const defaultCountry = detectCountry()
 
   return (
     <main className="min-h-screen bg-gradient-to-b from-white via-brand-50/30 to-white px-6 py-16">
-      <div className="mx-auto max-w-4xl">
+      <div className="mx-auto max-w-6xl">
         <div className="text-center">
-          <Link href="/" className="inline-flex items-center gap-2 text-sm text-zinc-500 hover:text-zinc-900">
+          <Link
+            href="/"
+            className="inline-flex items-center gap-2 text-sm text-zinc-500 hover:text-zinc-900"
+          >
             <Sparkles className="h-4 w-4 text-brand-600" />
             YouTube AI Summary
           </Link>
           <h1 className="mt-4 text-4xl font-bold">Pricing</h1>
-          <p className="mt-3 text-zinc-600">Simple, fair, cancel anytime.</p>
+          <p className="mt-3 text-zinc-600">
+            Simple, fair, cancel anytime. 7-day free trial on every plan.
+          </p>
         </div>
 
-        <div className="mt-12 grid grid-cols-1 gap-6 md:grid-cols-2">
-          <div className="rounded-2xl border border-zinc-200 bg-white p-8">
-            <h3 className="text-xl font-bold">Free</h3>
-            <div className="mt-4">
-              <span className="text-4xl font-bold">$0</span>
-              <span className="text-zinc-500"> / month</span>
-            </div>
-            <ul className="mt-6 space-y-2 text-sm text-zinc-700">
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> 5 summaries / day</li>
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> GPT-4o-mini model</li>
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> Clickable timeline</li>
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> Translate to 5 langs</li>
-            </ul>
-            <a
-              href={CHROME_STORE_URL}
-              className="mt-8 block rounded-lg border border-zinc-200 px-4 py-2.5 text-center text-sm font-semibold text-zinc-700 hover:bg-zinc-50">
-              Install Free
-            </a>
-          </div>
+        <PricingClient defaultCountry={defaultCountry} />
 
-          <div className="rounded-2xl border-2 border-brand-600 bg-brand-50/50 p-8">
-            <div className="flex items-center justify-between">
-              <h3 className="text-xl font-bold">Pro</h3>
-              <span className="flex items-center gap-1 rounded-full bg-amber-400 px-2 py-0.5 text-[10px] font-bold text-white">
-                <Crown className="h-3 w-3" />
-                MOST PICKED
-              </span>
-            </div>
-            <div className="mt-4">
-              <span className="text-4xl font-bold">$5</span>
-              <span className="text-zinc-500"> / month</span>
-            </div>
-            <ul className="mt-6 space-y-2 text-sm text-zinc-700">
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> <strong>Unlimited</strong> summaries</li>
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> GPT-4o model</li>
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> Long videos</li>
-              <li className="flex items-center gap-2"><Check className="h-4 w-4 text-emerald-500" /> Priority queue</li>
-            </ul>
-            <button
-              type="button"
-              onClick={handleSubscribe}
-              disabled={busy}
-              className="mt-8 flex w-full items-center justify-center gap-2 rounded-lg bg-brand-600 px-4 py-2.5 font-semibold text-white hover:bg-brand-700 disabled:opacity-60">
-              {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : null}
-              {busy ? "Redirecting…" : "Subscribe Now"}
-            </button>
-            {error && (
-              <p className="mt-3 text-center text-xs text-red-600">{error}</p>
-            )}
-            <p className="mt-3 text-center text-xs text-zinc-500">
-              Powered by Lemon Squeezy · Cancel anytime
-            </p>
-          </div>
-        </div>
-
-        <p className="mt-10 text-center text-xs text-zinc-500">
-          You&apos;ll be redirected to the Chrome Web Store if you haven&apos;t installed the extension yet.
+        <p className="mt-12 text-center text-xs text-zinc-500">
+          Prices shown in your local currency where available. Tax (VAT/GST)
+          calculated by Paddle at checkout.
         </p>
       </div>
     </main>

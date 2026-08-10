@@ -47,14 +47,25 @@ create trigger on_auth_user_created
 -- ========================================================================
 create table if not exists public.subscriptions (
   user_id uuid primary key references auth.users(id) on delete cascade,
+
+  -- Paddle (主要，2026-08 起使用)
+  paddle_customer_id text,         -- ctm_xxx
+  paddle_subscription_id text,     -- sub_xxx
+
+  -- Lemon Squeezy (遗留字段，已废弃但保留兼容；2026-08 之后不再写入)
   lemon_customer_id bigint,
   lemon_subscription_id bigint,
-  status text not null check (status in ('active', 'on_trial', 'past_due', 'paused', 'unpaid', 'cancelled', 'expired', 'grace')),
   ls_status text,
+
+  status text not null check (status in ('active', 'on_trial', 'past_due', 'paused', 'unpaid', 'cancelled', 'expired', 'grace')),
   current_period_end timestamptz,
   created_at timestamptz default now(),
   updated_at timestamptz default now()
 );
+
+-- Paddle 相关索引（webhook 频繁按 customer_id 查）
+create index if not exists idx_subscriptions_paddle_customer on public.subscriptions (paddle_customer_id);
+create index if not exists idx_subscriptions_paddle_sub on public.subscriptions (paddle_subscription_id);
 
 alter table public.subscriptions enable row level security;
 

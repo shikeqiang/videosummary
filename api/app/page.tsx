@@ -101,7 +101,7 @@ export default function HomePage() {
               <li>✅ GPT-4o-mini model</li>
               <li>✅ Clickable timeline</li>
               <li>✅ Translate to 5 languages</li>
-              <li>❌ Longer videos (>30 min)</li>
+              <li>❌ Longer videos (&gt;30 min)</li>
               <li>❌ Priority queue</li>
             </ul>
           </div>

@@ -1,11 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from "react"
 import { Sparkles, Clock, Languages, Copy, Check, Crown, Loader2, AlertCircle, FileText, ExternalLink } from "lucide-react"
 import { fetchTranscript, type TranscriptResult } from "../lib/transcript"
-import { createSummary, fetchMe, fetchUsage, getCheckoutUrl, type SummaryPayload } from "../lib/api"
+import { createSummary, createSummaryStream, fetchMe, fetchUsage, getCheckoutUrl, type SummaryPartial, type SummaryPayload } from "../lib/api"
 import { getSession } from "../lib/supabase"
 import { cn, formatTimestamp } from "../lib/utils"
 
-type Status = "idle" | "loading-transcript" | "loading-summary" | "ready" | "error"
+type Status = "idle" | "loading-transcript" | "loading-summary" | "streaming" | "ready" | "error"
 
 const LANGS = [
   { code: "auto", label: "Auto" },
@@ -15,11 +15,41 @@ const LANGS = [
   { code: "es", label: "ES" }
 ] as const
 
+
+
+/**
+ * 从流式 JSON 文本里提取已闭合的字段。
+ * 用于 reduce 阶段 token 到达时提前展示 summary/bullets/timeline/insight。
+ * 字符串字段用 regex "key": "..." 找闭合引号；数组字段用 "key": [...] 找闭合 ]。
+ */
+function extractCompletedFields(text: string): SummaryPartial | null {
+  const out: any = {}
+  for (const k of ["summary", "insight"]) {
+    const re = new RegExp('"' + k + '":\\s*"((?:[^"\\\\]|\\\\.)*)"')
+    const m = re.exec(text)
+    if (m) out[k] = m[1].replace(/\\\\(.)/g, "$1")
+  }
+  for (const k of ["bullets", "timeline"]) {
+    const re = new RegExp('"' + k + '":\\s*\\[([\\s\\S]*?)\\]', "")
+    const m = re.exec(text)
+    if (m) {
+      try { out[k] = JSON.parse("[" + m[1] + "]") } catch {}
+    }
+  }
+  if (Object.keys(out).length === 0) return null
+  return out as SummaryPartial
+}
+
 export default function Sidebar() {
   const [status, setStatus] = useState<Status>("idle")
   const [error, setError] = useState<string | null>(null)
   const [transcript, setTranscript] = useState<TranscriptResult | null>(null)
   const [summary, setSummary] = useState<SummaryPayload | null>(null)
+  const [streamStatus, setStreamStatus] = useState<string>("")
+  const [streamDraft, setStreamDraft] = useState<string>("")
+  const [partials, setPartials] = useState<SummaryPartial[]>([])
+  const [streamingParsed, setStreamingParsed] = useState<SummaryPartial | null>(null)
+  const [abortCtl, setAbortCtl] = useState<AbortController | null>(null)
   const [lang, setLang] = useState<typeof LANGS[number]["code"]>("auto")
   const [copied, setCopied] = useState<"summary" | "bullets" | null>(null)
   const [me, setMe] = useState<Awaited<ReturnType<typeof fetchMe>> | null>(null)
@@ -74,14 +104,55 @@ export default function Sidebar() {
       setTranscript(t)
 
       setStatus("loading-summary")
-      const s = await createSummary({
-        videoId: t.videoId,
-        title: t.title,
-        channel: t.channel,
-        language: lang === "auto" ? undefined : lang,
-        transcript: t.plainText
-      })
+      setStreamStatus("Preparing…")
+      setStreamDraft("")
+      setPartials([])
+      setStreamingParsed(null)
+      const ctl = new AbortController()
+      setAbortCtl(ctl)
+      const s = await createSummaryStream(
+        {
+          videoId: t.videoId,
+          title: t.title,
+          channel: t.channel,
+          language: lang === "auto" ? undefined : lang,
+          transcript: t.plainText
+        },
+        {
+          onStatus: (st) => {
+            if (st.phase === "map" && st.total && st.chunk) {
+              setStreamStatus(`Analyzing part ${st.chunk}/${st.total}…`)
+            } else if (st.phase === "reduce") {
+              setStreamStatus("Combining results…")
+              setStatus("streaming")
+            } else {
+              setStreamStatus(st.message ?? st.phase)
+            }
+          },
+          onPartial: (chunk, total, partial) => {
+            setPartials((arr) => {
+              const next = arr.slice()
+              next[chunk - 1] = partial
+              return next
+            })
+          },
+          onToken: (delta) => {
+            setStreamDraft((p) => {
+              const next = p + delta
+              const parsed = extractCompletedFields(next)
+              if (parsed && parsed.summary) setStreamingParsed(parsed)
+              return next
+            })
+          }
+        },
+        { signal: ctl.signal }
+      )
       setSummary(s)
+      setStreamDraft("")
+      setStreamStatus("")
+      setPartials([])
+      setStreamingParsed(null)
+      setAbortCtl(null)
       setStatus("ready")
       if (loggedIn) await refreshQuota()
     } catch (e: any) {
@@ -93,20 +164,69 @@ export default function Sidebar() {
   async function handleTranslate(target: string) {
     if (!transcript) return
     setStatus("loading-summary")
+    setStreamStatus("Translating…")
+    setStreamDraft("")
+    setPartials([])
+    setStreamingParsed(null)
+    const ctl = new AbortController()
+    setAbortCtl(ctl)
     try {
-      const s = await createSummary({
-        videoId: transcript.videoId,
-        title: transcript.title,
-        channel: transcript.channel,
-        language: target,
-        transcript: transcript.plainText
-      })
+      const s = await createSummaryStream(
+        {
+          videoId: transcript.videoId,
+          title: transcript.title,
+          channel: transcript.channel,
+          language: target,
+          transcript: transcript.plainText
+        },
+        {
+          onStatus: (st) => {
+            if (st.phase === "reduce") {
+              setStreamStatus("Combining results…")
+              setStatus("streaming")
+            } else {
+              setStreamStatus(st.message ?? st.phase)
+            }
+          },
+          onPartial: (chunk, total, partial) => {
+            setPartials((arr) => {
+              const next = arr.slice()
+              next[chunk - 1] = partial
+              return next
+            })
+          },
+          onToken: (delta) => {
+            setStreamDraft((p) => {
+              const next = p + delta
+              const parsed = extractCompletedFields(next)
+              if (parsed && parsed.summary) setStreamingParsed(parsed)
+              return next
+            })
+          }
+        },
+        { signal: ctl.signal }
+      )
       setSummary(s)
+      setStreamDraft("")
+      setStreamStatus("")
+      setPartials([])
+      setStreamingParsed(null)
+      setAbortCtl(null)
       setStatus("ready")
     } catch (e: any) {
       setError(e.message ?? "Translate failed")
       setStatus("error")
     }
+  }
+
+  async function handleCancel() {
+    abortCtl?.abort()
+    setStatus("idle")
+    setStreamDraft("")
+    setStreamStatus("")
+    setPartials([])
+    setStreamingParsed(null)
+    setAbortCtl(null)
   }
 
   async function handleCopy(kind: "summary" | "bullets") {
@@ -223,6 +343,59 @@ export default function Sidebar() {
               <Skeleton h="h-3 w-1/2" />
               <Skeleton h="h-3 w-2/3" />
             </div>
+          </div>
+        )}
+
+        {(status === "loading-summary" || status === "streaming") && streamStatus && (
+          <div className="mt-3 flex items-center justify-between gap-2 text-xs text-zinc-500 dark:text-zinc-400">
+            <div className="flex items-center gap-2">
+              {status === "streaming" && (
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500" />
+              )}
+              {streamStatus}
+            </div>
+            {(status === "loading-summary" || status === "streaming") && abortCtl && (
+              <button
+                type="button"
+                onClick={handleCancel}
+                className="rounded-md border border-zinc-200 px-2 py-0.5 text-[11px] hover:bg-zinc-100 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                title="Stop">
+                ✕ Stop
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* (c) 多 chunk 进度：每块独立显示已完成的 summary */}
+        {partials.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {partials.map((p, i) => p ? (
+              <div key={i} className="rounded-md border border-zinc-200 bg-zinc-50 p-2 dark:border-zinc-700 dark:bg-zinc-900">
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-zinc-500">
+                  Part {i + 1}/{partials.length}
+                </div>
+                <p className="text-xs leading-relaxed text-zinc-700 dark:text-zinc-300">{p.summary}</p>
+              </div>
+            ) : null)}
+          </div>
+        )}
+
+        {/* (b) reduce 阶段：如果能从流式 JSON 抽出已完成的字段，就显示结构化 */}
+        {status === "streaming" && streamingParsed && (
+          <div className="mt-3 rounded-md border border-emerald-200 bg-emerald-50/50 p-2 dark:border-emerald-800 dark:bg-emerald-900/20">
+            <div className="mb-1 text-[10px] font-semibold uppercase tracking-wide text-emerald-700 dark:text-emerald-400">
+              Streaming final summary…
+            </div>
+            {streamingParsed.summary && (
+              <p className="text-sm leading-relaxed text-zinc-800 dark:text-zinc-200">{streamingParsed.summary}</p>
+            )}
+            {streamingParsed.bullets && streamingParsed.bullets.length > 0 && (
+              <ul className="mt-2 space-y-1 text-xs text-zinc-700 dark:text-zinc-300">
+                {streamingParsed.bullets.slice(0, 8).map((b, i) => (
+                  <li key={i}>• {b}</li>
+                ))}
+              </ul>
+            )}
           </div>
         )}
 
