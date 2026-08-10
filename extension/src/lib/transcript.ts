@@ -118,13 +118,27 @@ function pickBestTrack(tracks: YtCaptionTrack[]): YtCaptionTrack | null {
  */
 function getInnertubeApiKey(): string | null {
   const w = window as unknown as Record<string, unknown>
-  const cfg = w.ytcfg as { data_?: string } | undefined
-  const data = cfg?.data_
-  if (!data) return null
-
-  // API key 在 ytcfg 中以 INNERTUBE_API_KEY: "xxx" 形式出现
-  const match = data.match(/INNERTUBE_API_KEY[\s":]+"([a-zA-Z0-9_-]+)"/)
-  return match ? match[1] : null
+  const cfg = w.ytcfg as { data_?: string } | { data?: string } | undefined
+  // ytcfg 可能是 object (有 .data_ 字符串属性) 或直接 { data: "..." } 形式
+  const data: string | undefined =
+    (cfg as any)?.data_ ?? (cfg as any)?.data ?? (cfg as any)?.body
+  if (typeof data !== "string") {
+    console.log("[transcript] ytcfg type:", typeof cfg, "  keys:", cfg ? Object.keys(cfg as any).slice(0, 8) : "(no ytcfg)")
+    return null
+  }
+  // 多种可能的 key 字段名（YouTube 改过几次）
+  const patterns = [
+    /INNERTUBE_API_KEY\s*:\s*"([A-Za-z0-9_-]+)"/,
+    /"INNERTUBE_API_KEY"\s*:\s*"([A-Za-z0-9_-]+)"/,
+    /"INNERTUBE_API_KEY"\s*=\s*"([A-Za-z0-9_-]+)"/,
+    /INNERTUBE_API_KEY\s*=\s*"([A-Za-z0-9_-]+)"/,
+  ]
+  for (const re of patterns) {
+    const m = data.match(re)
+    if (m) return m[1]
+  }
+  console.log("[transcript] INNERTUBE_API_KEY not found in ytcfg (ytcfg len:", data.length, ")")
+  return null
 }
 
 /**
