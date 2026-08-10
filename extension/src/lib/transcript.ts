@@ -102,11 +102,20 @@ function getInnertubeApiKey(): string | null {
  * 主入口：抓取视频 transcript
  */
 export async function fetchTranscript(videoId: string): Promise<TranscriptResult | null> {
-  if (!videoId) return null
+  console.log("[transcript] fetchTranscript CALLED with videoId:", JSON.stringify(videoId))
+  if (!videoId) {
+    console.log("[transcript] early-return: videoId is empty")
+    return null
+  }
   const w = window as unknown as Record<string, unknown>
+  console.log("[transcript] ytInitialPlayerResponse exists:", typeof w.ytInitialPlayerResponse)
 
   const playerResp = findPlayerResponse()
-  if (!playerResp) return null
+  if (!playerResp) {
+    console.log("[transcript] early-return: no ytInitialPlayerResponse (SPA page not loaded yet?)")
+    return null
+  }
+  console.log("[transcript] playerResp found, has captions:", !!playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks)
 
   const tracks = playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks
   if (!tracks || tracks.length === 0) return null
