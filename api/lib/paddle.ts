@@ -121,7 +121,9 @@ export function verifyWebhookSignature(
     return { valid: false, reason: `ts too old (${Math.abs(nowSec - tsNum)}s drift, max 300s)` }
   }
 
-  const toSign = `${ts}.${rawBody}`
+  // Paddle 官方签名格式：ts=<timestamp>:<body>
+  //   https://developer.paddle.com/webhooks/signature-verification
+  const toSign = `ts=${ts}:${rawBody}`
   const expected = crypto.createHmac("sha256", secret).update(toSign, "utf8").digest("hex")
 
   if (expected.length !== h1.length) return { valid: false, reason: "hmac length mismatch" }
