@@ -168,11 +168,11 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
       const priceId = tier.priceIds[cycle]
       setBusyTier(tier.slug)
       try {
-        const email = emailInput.trim()
-        console.log("[pricing-debug] emailInput state:", JSON.stringify(emailInput), "  email after trim:", JSON.stringify(email))
+        // 从 DOM 读 email（不依赖 React state，最稳）
+        const email = (emailInputRef.current?.value ?? "").trim()
+        console.log("[pricing-debug] email from DOM:", JSON.stringify(email))
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
           setBootError("Please enter a valid email before subscribing.")
-          // 滚动并 focus 到 email 输入框
           emailInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
           emailInputRef.current?.focus()
           return
@@ -295,8 +295,8 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
           ref={emailInputRef}
           type="email"
           required
-          value={emailInput}
-          onChange={(e) => setEmailInput(e.target.value)}
+          defaultValue={emailInput}
+          onBlur={(e) => setEmailInput(e.target.value)}
           placeholder="you@example.com"
           className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-brand-600 focus:outline-none"
         />
