@@ -112,6 +112,19 @@ echo "→ plasmo build --target=$TARGET"
 # 5. post-build：Plasmo 0.86 把 manifest name 字段搞空，这里补
 bash "$ROOT/scripts/patch-node-modules.sh" p5 || true
 
+# 6. post-build：从 content_scripts[].css 删掉 css（避免污染 host page；
+#    shadow root 走 chrome.runtime.getURL 自己拉）
+python3 - <<PYEOF
+import json, os, glob
+for manifest in glob.glob("$EXT_DIR/build/chrome-mv3-prod/manifest.json"):
+    with open(manifest) as f: d = json.load(f)
+    for cs in d.get("content_scripts", []):
+        if "css" in cs and cs["css"]:
+            print(f"  ok removed content_scripts.css from {manifest}")
+            cs["css"] = []
+    with open(manifest, "w") as f: json.dump(d, f, indent=2)
+PYEOF
+
 BUILD_DIR="$EXT_DIR/build/$TARGET-prod"
 echo
 echo "============================================="
