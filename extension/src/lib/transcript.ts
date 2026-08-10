@@ -116,17 +116,28 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
 
   // 构造 fmt=json3 的字幕 url
   const separator = track.baseUrl.includes("?") ? "&" : "?"
-  const url = `${track.baseUrl}${separator}fmt=json3&pot=${getInnertubeApiKey() ?? ""}`
+  const params = ["fmt=json3"]
+  const pot = getInnertubeApiKey()
+  if (pot) params.push(`pot=${pot}`)
+  const url = `\${track.baseUrl}\${separator}\${params.join("&")}`
+  console.log("[transcript] tracks:", tracks.length, "picked:", track.languageCode, track.kind ?? "?")
+  console.log("[transcript] url:", url.slice(0, 140))
 
   let json: any
   try {
     const res = await fetch(url, { credentials: "include" })
-    if (!res.ok) return null
+    console.log("[transcript] status:", res.status, res.headers.get("content-type")?.slice(0,40))
+    if (!res.ok) {
+      const t = await res.text().catch(() => "")
+      console.warn("[transcript] non-OK body head:", t.slice(0, 200))
+      return null
+    }
     json = await res.json()
   } catch {
     return null
   }
 
+  console.log("[transcript] events:", json?.events?.length ?? 0)
   const evList: Array<{ tStartMs: number; dDurationMs: number; segs?: Array<{ utf8: string }> }> =
     json?.events ?? []
   const segments: TranscriptSegment[] = []
