@@ -50,6 +50,7 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
   // ---- 引导状态 ----
   const [boot, setBoot] = useState<PaddleBootstrap | null>(null)
   const [userEmail, setUserEmail] = useState<string | null>(null)
+  const [emailInput, setEmailInput] = useState<string>("")
   const [bootError, setBootError] = useState<string | null>(null)
 
   // ---- Paddle SDK 状态 ----
@@ -82,6 +83,7 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
         setBoot(json)
         if (typeof json.userEmail === "string" && json.userEmail.length > 0) {
           setUserEmail(json.userEmail)
+          setEmailInput(json.userEmail)
         }
       } catch (e: any) {
         if (!cancelled)
@@ -165,11 +167,14 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
       const priceId = tier.priceIds[cycle]
       setBusyTier(tier.slug)
       try {
+        const email = emailInput.trim()
+        if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+          setBootError("Please enter a valid email before subscribing.")
+          return
+        }
         paddle.Checkout.open({
           items: [{ priceId, quantity: 1 }],
-          ...(userEmail
-            ? { customer: { email: userEmail } }
-            : {}),
+          customer: { email },
           settings: {
             displayMode: "overlay",
             variant: "one-page",
@@ -177,7 +182,8 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
           },
           customData: {
             tier_slug: tier.slug,
-            cycle
+            cycle,
+            email  // webhook 用这个匹配 Supabase profile
           }
         })
       } catch (e: any) {
@@ -274,6 +280,26 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
           Price preview failed: {previewError}
         </p>
       )}
+
+      {/* Email 输入（webhook 用它匹配 Supabase profile）*/}
+      <div className="mx-auto mt-8 max-w-md">
+        <label className="block text-xs font-medium text-zinc-600">
+          Email (used to activate your subscription)
+        </label>
+        <input
+          type="email"
+          required
+          value={emailInput}
+          onChange={(e) => setEmailInput(e.target.value)}
+          placeholder="you@example.com"
+          className="mt-1 w-full rounded-lg border border-zinc-300 px-3 py-2 text-sm focus:border-brand-600 focus:outline-none"
+        />
+        {userEmail && (
+          <p className="mt-1 text-[10px] text-zinc-500">
+            Logged in as {userEmail}
+          </p>
+        )}
+      </div>
 
       {/* Tier cards */}
       <div className="mt-10 grid grid-cols-1 gap-6 md:grid-cols-3">

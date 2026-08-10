@@ -1,4 +1,3 @@
-import crypto from "node:crypto"
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "~/lib/supabase-server"
 import { verifyWebhookSignature, mapSubscriptionStatus, getPaddleEnv } from "~/lib/paddle"
@@ -33,6 +32,10 @@ interface PaddleSubscriptionEvent {
     id: string                                  // sub_xxx
     status: string                              // active, trialing, past_due, canceled, paused
     customer_id: string                         // ctm_xxx
+    customer?: {
+      email?: string
+      id?: string
+    }
     custom_data?: {
       user_id?: string
       email?: string
@@ -61,17 +64,7 @@ export async function POST(req: NextRequest) {
   // 1. 验签
   const v = verifyWebhookSignature(rawBody, sigHeader)
   if (!v.valid) {
-    // 临时调试：把关键对账信息打出来（Paddle h1 vs 我们算的 expected h1 vs body hash）
-    const bodySha = crypto.createHash("sha256").update(rawBody).digest("hex")
-    const expectedH1 = crypto
-      .createHmac("sha256", process.env.PADDLE_WEBHOOK_SECRET!)
-      .update(`${v.ts}:${rawBody}`, "utf8")
-      .digest("hex")
-    console.warn(
-      `[paddle-webhook] DEBUG invalid sig: reason=${v.reason} ` +
-      `ts=${v.ts} bodyLen=${rawBody.length} bodySha=${bodySha} ` +
-      `sigHeader=${sigHeader?.slice(0, 100)} expectedH1=${expectedH1}`
-    )
+    console.warn(`[paddle-webhook] signature invalid (env=${env}): ${v.reason}`)
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 })
   }
 
@@ -85,7 +78,6 @@ export async function POST(req: NextRequest) {
 
   const eventType = event.event_type
   const data = event.data
-  const userId = data.custom_data?.user_id
   const paddleSubId = data.id
   const paddleCustomerId = data.customer_id
   const paddleStatus = data.status
@@ -94,10 +86,41 @@ export async function POST(req: NextRequest) {
     data.next_billed_at ??
     null
 
-  console.log(
-    `[paddle-webhook] env=${env} event=${eventType} status=${paddleStatus}` +
-    ` user=${userId ?? "?"} sub=${paddleSubId}`
-  )
+  const sb = supabaseAdmin()
+
+  // 2. 解析 user_id：先 custom_data.user_id，缺失就用 custom_data.email 查 profile
+  let userId: string | null = data.custom_data?.user_id ?? null
+  const customEmail: string | null =
+    data.custom_data?.email ?? data.customer?.email ?? null
+
+  if (!userId && customEmail) {
+    const { data: profile } = await sb
+      .from("profiles")
+      .select("id")
+      .eq("email", customEmail)
+      .maybeSingle()
+    if (profile?.id) {
+      userId = profile.id
+      console.log(
+        `[paddle-webhook] env=${env} event=${eventType} status=${paddleStatus}` +
+        ` user=${userId} (from email) sub=${paddleSubId}`
+      )
+    } else {
+      console.warn(
+        `[paddle-webhook] env=${env} event=${eventType} no profile for email=${customEmail}` +
+        ` sub=${paddleSubId} — dropping (待 user 注册/登录后手动 claim)`
+      )
+      return NextResponse.json(
+        { ignored: true, reason: "no matching profile for email", email: customEmail },
+        { status: 200 }
+      )
+    }
+  } else {
+    console.log(
+      `[paddle-webhook] env=${env} event=${eventType} status=${paddleStatus}` +
+      ` user=${userId ?? "?"} sub=${paddleSubId}`
+    )
+  }
 
   // 3. 只处理 subscription.* 事件
   if (!eventType.startsWith("subscription.")) {
@@ -120,7 +143,6 @@ export async function POST(req: NextRequest) {
   const mapped = mapSubscriptionStatus(paddleStatus)
 
   // 6. upsert subscriptions 表
-  const sb = supabaseAdmin()
   const { error: subErr } = await sb.from("subscriptions").upsert(
     {
       user_id: userId,
