@@ -1,12 +1,26 @@
-import { redirect } from "next/navigation"
+import { Suspense } from "react"
+import AuthCallbackClient from "./AuthCallbackClient"
 
 /**
- * Supabase OAuth callback：把 code 换 session 后回跳到扩展
+ * Supabase OAuth / Email magic link callback。
  *
- * 这里通常不需要手写——Supabase redirect URL 指向这一页，
- * 由前端 useEffect 接 ?code 并完成登录，然后跳转。
- * MVP 阶段我们让前端直接从 storage 读，避免这一跳。
+ * Supabase 把用户带到这里，URL 上带 ?code=xxx（或 magic link 的 token）。
+ * 这一页是 server component 拿到 code 直接 render <AuthCallbackClient>，
+ * 客户端组件用 @supabase/ssr 检测 session 并通过 BroadcastChannel / localStorage
+ * 通知打开的扩展 tab 完成登录。
+ *
+ * 同时支持「Supabase 默认邮件验证」和「magic link」两种场景：
+ *  - token_hash + type=email/magiclink：客户端用 verifyOtp() 兑换
+ *  - code：客户端用 exchangeCodeForSession() 兑换
  */
-export default function AuthCallback() {
-  redirect("/")
+export const dynamic = "force-dynamic"
+
+export default function AuthCallbackPage() {
+  return (
+    <main className="flex min-h-screen flex-col items-center justify-center bg-gradient-to-b from-white to-brand-50 px-6 text-center">
+      <Suspense fallback={<p className="text-zinc-500">Completing sign-in…</p>}>
+        <AuthCallbackClient />
+      </Suspense>
+    </main>
+  )
 }

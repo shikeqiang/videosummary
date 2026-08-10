@@ -1,0 +1,50 @@
+{
+  "name": "YouTube AI Summary",
+  "version": "1.0.0",
+  "description": "Get instant AI summaries of any YouTube video",
+  "author": "videosummary",
+  "icons": {
+    "16": "gen-assets/icon16.plasmo.png",
+    "32": "gen-assets/icon32.plasmo.png",
+    "48": "gen-assets/icon48.plasmo.png",
+    "64": "gen-assets/icon64.plasmo.png",
+    "128": "gen-assets/icon128.plasmo.png"
+  },
+  "action": {
+    "default_icon": {
+      "16": "gen-assets/icon16.plasmo.png",
+      "32": "gen-assets/icon32.plasmo.png",
+      "48": "gen-assets/icon48.plasmo.png",
+      "64": "gen-assets/icon64.plasmo.png",
+      "128": "gen-assets/icon128.plasmo.png"
+    },
+    "default_popup": "popup.html"
+  },
+  "background": {
+    "service_worker": "static/background/index.ts"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
+  },
+  "permissions": ["storage", "tabs", "activeTab"],
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/watch*"],
+      "js": ["static/contents/youtube-sidebar.tsx"]
+    }
+  ],
+  "host_permissions": [
+    "https://www.youtube.com/*",
+    "https://api.supabase.co/*",
+    "https://*.supabase.co/*",
+    "https://api.lemonsqueezy.com/*"
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": ["*.css", "*.png"],
+      "matches": ["https://www.youtube.com/*"]
+    }
+  ],
+  "manifest_version": 3
+}

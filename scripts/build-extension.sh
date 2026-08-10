@@ -109,6 +109,9 @@ echo
 echo "→ plasmo build --target=$TARGET"
 (cd "$EXT_DIR" && npx plasmo build --target="$TARGET")
 
+# 5. post-build：Plasmo 0.86 把 manifest name 字段搞空，这里补
+bash "$ROOT/scripts/patch-node-modules.sh" p5 || true
+
 BUILD_DIR="$EXT_DIR/build/$TARGET-prod"
 echo
 echo "============================================="

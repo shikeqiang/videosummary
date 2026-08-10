@@ -30,6 +30,7 @@ MODE="apply"
 for arg in "$@"; do
   case "$arg" in
     --verify) MODE="verify" ;;
+    p5)       MODE="p5" ;;
     --reset|--revert) MODE="reset" ;;
     --help|-h) sed -n '2,18p' "$0"; exit 0 ;;
     *) echo "unknown flag: $arg"; exit 1 ;;
@@ -45,7 +46,7 @@ PASS=0; FAIL=0
 ok()  { echo "  ✓ $*"; PASS=$((PASS+1)); }
 bad() { echo "  ✗ $*"; FAIL=$((FAIL+1)); }
 note(){ echo "  · $*"; }
-PATCHES_TOTAL=4
+PATCHES_TOTAL=5
 
 # Marker used to verify stub patches
 MARKER="// === PATCHED-BY-scripts-patch-node-modules.sh ==="
@@ -87,7 +88,34 @@ open(f, "w").write(src.replace(old, new, 1))
 # ====================================================================
 # Patch 1: sharp stub
 # ====================================================================
+P5_MANIFEST="$EXT_DIR/build/chrome-mv3-prod/manifest.json"
+P5_PKG="$EXT_DIR/package.json"
+patch_p5() {
+  python3 - <<PYEOF
+import json, os, sys
+manifest = "$P5_MANIFEST"
+pkg = "$P5_PKG"
+if not (os.path.exists(manifest) and os.path.exists(pkg)):
+    print("  ok manifest not yet built (skip)")
+    sys.exit(0)
+m = json.load(open(manifest))
+p = json.load(open(pkg))
+if not m.get("name"):
+    new_name = p.get("display") or p.get("name") or "YouTube AI Summary"
+    m["name"] = new_name
+    json.dump(m, open(manifest, "w"), indent=2)
+    print(f"  ok manifest name patched: \"{new_name}\"")
+else:
+    print(f"  ok manifest name already set (=\"{m['name']}\"), skip")
+PYEOF
+}
+
 case "$MODE" in
+  p5)
+    # post-build only: manifest name patch
+    patch_p5
+    exit 0
+    ;;
   apply)
     copy_stub "$PATCH_DIR/sharp/lib/index.js" "$NM/sharp/lib/index.js"
     cat > "$NM/sharp/package.json" <<JSON
@@ -116,7 +144,13 @@ esac
 # ====================================================================
 # Patch 2: @plasmo-static-common stub
 # ====================================================================
+
 case "$MODE" in
+  p5)
+    # post-build only: manifest name patch
+    patch_p5
+    exit 0
+    ;;
   apply)
     copy_stub "$PATCH_DIR/@plasmo-static-common/package.json" "$NM/@plasmo-static-common/package.json"
     copy_stub "$PATCH_DIR/@plasmo-static-common/react/package.json" "$NM/@plasmo-static-common/react/package.json"
@@ -143,7 +177,13 @@ P3_FILE="$NM/@plasmohq/parcel-resolver/dist/index.js"
 P3_OLD='var l=[".ts",".tsx",".svelte",".vue",".json"]'
 P3_NEW='var l=[".ts",".tsx",".svelte",".vue",".json",".css"]'
 
+
 case "$MODE" in
+  p5)
+    # post-build only: manifest name patch
+    patch_p5
+    exit 0
+    ;;
   apply)
     if [ ! -f "$P3_FILE" ]; then
       bad "@plasmohq/parcel-resolver/dist/index.js missing (npm not installed?)"
@@ -186,7 +226,13 @@ P4_FILE="$NM/@plasmohq/parcel-resolver-post/dist/index.js"
 P4_OLD='function x(t,e=y){return e.flatMap(r=>[(0,d.resolve)(`${t}${r}`),(0,d.resolve)(t,`index${r}`)]).find(B)}'
 P4_NEW='function x(t,e=y){const c=[t,...e.flatMap(r=>[(0,d.resolve)(`${t}${r}`),(0,d.resolve)(t,`index${r}`)])];return c.find(B)}'
 
+
 case "$MODE" in
+  p5)
+    # post-build only: manifest name patch
+    patch_p5
+    exit 0
+    ;;
   apply)
     if [ ! -f "$P4_FILE" ]; then
       bad "@plasmohq/parcel-resolver-post/dist/index.js missing (npm not installed?)"
@@ -207,6 +253,12 @@ case "$MODE" in
   verify)
     if [ -f "$P4_FILE" ] && grep -qF 'const c=[t,...e.flatMap' "$P4_FILE" 2>/dev/null; then
       ok "parcel-resolver-post x() patch present"
+    patch_p5 || FAIL=$((FAIL+1))
+    if grep -qF '"name": "YouTube AI Summary"' "$EXT_DIR/build/chrome-mv3-prod/manifest.json" 2>/dev/null; then
+      ok "manifest name patched"
+    else
+      bad "manifest name still empty"
+    fi
     else
       bad "parcel-resolver-post x() patch MISSING"
     fi
@@ -222,7 +274,13 @@ esac
 # ----- summary -----
 echo
 echo "============================================="
+
 case "$MODE" in
+  p5)
+    # post-build only: manifest name patch
+    patch_p5
+    exit 0
+    ;;
   apply)
     echo "  Patches applied: $PASS  ·  Failed: $FAIL"
     if [ "$FAIL" -gt 0 ]; then
@@ -243,3 +301,9 @@ case "$MODE" in
     ;;
 esac
 echo "============================================="
+
+# ----- 5. (post-build) manifest name patch -----
+# Plasmo 0.86 生成的 chrome-mv3.plasmo.manifest.json 里 name 字段为空
+# build 完后在 build/chrome-mv3-prod/manifest.json 把空 name 替换为 package.json 的 display 字段
+P5_MANIFEST="$EXT_DIR/build/chrome-mv3-prod/manifest.json"
+P5_PKG="$EXT_DIR/package.json"
