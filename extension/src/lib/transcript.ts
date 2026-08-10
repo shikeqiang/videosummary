@@ -48,25 +48,54 @@ type YtPlayerResponse = {
  *
  * 包含容错：有时 ytInitialPlayerResponse 不在全局，有时在 ytInitialData 中
  */
-function findPlayerResponse(): YtPlayerResponse | null {
-  const w = window as unknown as Record<string, unknown>
+function findPlayerResponse(videoId: string): Promise<YtPlayerResponse | null> {
+  return (async () => {
+    const w = window as unknown as Record<string, unknown>
 
-  // 1) window.ytInitialPlayerResponse
-  const a = w.ytInitialPlayerResponse as YtPlayerResponse | undefined
-  if (a?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-    return a
-  }
+    // 1) window.ytInitialPlayerResponse（直接 SPA 加载时存在）
+    const a = w.ytInitialPlayerResponse as YtPlayerResponse | undefined
+    if (a?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+      return a
+    }
 
-  // 2) fallback: parse ytInitialData 中的 metadataRowRenderer 等（不完整，作 best-effort）
-  const initialData = w.ytInitialData as string | undefined
-  if (initialData) {
+    // 2) fallback: YouTube InnerTube API /youtubei/v1/player
+    //    SPA 切换视频时全局变量不会更新，这个 API 总能拿到当前视频的 player response
+    const apiKey = getInnertubeApiKey()
+    if (!apiKey) {
+      console.warn("[transcript] no INNERTUBE_API_KEY, cannot fallback")
+      return null
+    }
+
     try {
-      // 这里仅占位：实际从 initialData 解析 captionTracks 比较繁琐，
-      // 多数情况下 ytInitialPlayerResponse 已足够。
-    } catch {}
-  }
-
-  return null
+      console.log("[transcript] fallback: calling InnerTube player API for", videoId)
+      const res = await fetch(
+        `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            videoId,
+            context: {
+              client: { clientName: "WEB", clientVersion: "2.20240101.00.00" }
+            }
+          })
+        }
+      )
+      if (!res.ok) {
+        console.warn("[transcript] InnerTube API non-OK:", res.status)
+        return null
+      }
+      const json = (await res.json()) as YtPlayerResponse
+      if (json?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+        return json
+      }
+      console.warn("[transcript] InnerTube API returned no captions")
+      return null
+    } catch (e: any) {
+      console.warn("[transcript] InnerTube API err:", e?.message ?? e)
+      return null
+    }
+  })()
 }
 
 /**
@@ -110,9 +139,9 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   const w = window as unknown as Record<string, unknown>
   console.log("[transcript] ytInitialPlayerResponse exists:", typeof w.ytInitialPlayerResponse)
 
-  const playerResp = findPlayerResponse()
+  const playerResp = await findPlayerResponse(videoId)
   if (!playerResp) {
-    console.log("[transcript] early-return: no ytInitialPlayerResponse (SPA page not loaded yet?)")
+    console.log("[transcript] early-return: no playerResponse (window + API fallback both failed)")
     return null
   }
   console.log("[transcript] playerResp found, has captions:", !!playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks)
