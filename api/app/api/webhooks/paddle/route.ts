@@ -1,3 +1,4 @@
+import crypto from "node:crypto"
 import { NextRequest, NextResponse } from "next/server"
 import { supabaseAdmin } from "~/lib/supabase-server"
 import { verifyWebhookSignature, mapSubscriptionStatus, getPaddleEnv } from "~/lib/paddle"
@@ -60,6 +61,17 @@ export async function POST(req: NextRequest) {
   // 1. 验签
   const v = verifyWebhookSignature(rawBody, sigHeader)
   if (!v.valid) {
+    // 临时调试：把关键对账信息打出来（Paddle h1 vs 我们算的 expected h1 vs body hash）
+    const bodySha = crypto.createHash("sha256").update(rawBody).digest("hex")
+    const expectedH1 = crypto
+      .createHmac("sha256", process.env.PADDLE_WEBHOOK_SECRET!)
+      .update(`${v.ts}:${rawBody}`, "utf8")
+      .digest("hex")
+    console.warn(
+      `[paddle-webhook] DEBUG invalid sig: reason=${v.reason} ` +
+      `ts=${v.ts} bodyLen=${rawBody.length} bodySha=${bodySha} ` +
+      `sigHeader=${sigHeader?.slice(0, 100)} expectedH1=${expectedH1}`
+    )
     return NextResponse.json({ error: "Invalid signature" }, { status: 401 })
   }
 
