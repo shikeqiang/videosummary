@@ -1,6 +1,6 @@
 "use client"
 
-import { useCallback, useEffect, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { initializePaddle, type Paddle } from "@paddle/paddle-js"
 import { Check, Crown, Loader2 } from "lucide-react"
 
@@ -50,6 +50,7 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
   // ---- 引导状态 ----
   const [boot, setBoot] = useState<PaddleBootstrap | null>(null)
   const [userEmail, setUserEmail] = useState<string | null>(null)
+  const emailInputRef = useRef<HTMLInputElement | null>(null)
   const [emailInput, setEmailInput] = useState<string>("")
   const [bootError, setBootError] = useState<string | null>(null)
 
@@ -170,6 +171,9 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
         const email = emailInput.trim()
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
           setBootError("Please enter a valid email before subscribing.")
+          // 滚动并 focus 到 email 输入框
+          emailInputRef.current?.scrollIntoView({ behavior: "smooth", block: "center" })
+          emailInputRef.current?.focus()
           return
         }
         paddle.Checkout.open({
@@ -287,6 +291,7 @@ export default function PricingClient({ defaultCountry }: PricingClientProps) {
           Email (used to activate your subscription)
         </label>
         <input
+          ref={emailInputRef}
           type="email"
           required
           value={emailInput}
