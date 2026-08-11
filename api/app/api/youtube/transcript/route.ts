@@ -1,12 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
 
-/**
- * GET /api/youtube/transcript?videoId=xxx
- *
- * 代替扩展端 fetch YouTube 的 timedtext API。
- * 我们从服务端拿 fresh 的 watch page HTML → parse player response → fetch captions。
- * 解决扩展端遇到的：签名过期 / cookie 不匹配 / IP 校验等所有问题。
- */
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
 
@@ -23,23 +16,34 @@ function pickBestTrack(tracks: any[]): any | null {
 }
 
 function extractPlayerResponse(html: string): any | null {
+  // 找 "ytInitialPlayerResponse = " 起点
   const marker = "ytInitialPlayerResponse = "
   const i = html.indexOf(marker)
   if (i < 0) return null
 
+  // 找第一个 { (对象起点)
   let j = i + marker.length
   while (j < html.length && html[j] !== "{") j++
   if (j >= html.length) return null
 
-  // 字符串感知的括号匹配（避免把 JSON 字符串里的 } 误认）
+  // 字符串感知的括号匹配：找到 depth=0 的最外层 }
   let depth = 0
   let inString = false
   let escapeNext = false
   for (let k = j; k < html.length; k++) {
     const c = html[k]
-    if (escapeNext) { escapeNext = false; continue }
-    if (c === "\\" && inString) { escapeNext = true; continue }
-    if (c === '"' && !escapeNext) { inString = !inString; continue }
+    if (escapeNext) {
+      escapeNext = false
+      continue
+    }
+    if (c === "\\" && inString) {
+      escapeNext = true
+      continue
+    }
+    if (c === '"' && !escapeNext) {
+      inString = !inString
+      continue
+    }
     if (inString) continue
     if (c === "{") depth++
     else if (c === "}") {
@@ -49,8 +53,10 @@ function extractPlayerResponse(html: string): any | null {
         try {
           return JSON.parse(json)
         } catch (e: any) {
-          console.error("[transcript-api] parse err:", e?.message?.slice(0, 200))
-          console.error("[transcript-api] json head:", json.slice(0, 200))
+          // parse 失败 → log 然后回退
+          console.error("[transcript-api] JSON parse err:", e?.message?.slice(0, 200))
+          console.error("[transcript-api] json head (300c):", json.slice(0, 300))
+          console.error("[transcript-api] json tail (200c):", json.slice(-200))
           return null
         }
       }
@@ -128,7 +134,7 @@ export async function GET(req: NextRequest) {
       plainText: texts.join(" ")
     })
   } catch (e: any) {
-    console.error("[transcript-api] error:", e?.message ?? e)
+    console.error("[transcript-api] outer error:", e?.message ?? e)
     return NextResponse.json({ error: "internal", message: e?.message }, { status: 500 })
   }
 }
