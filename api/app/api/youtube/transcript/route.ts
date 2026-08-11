@@ -15,54 +15,28 @@ function pickBestTrack(tracks: any[]): any | null {
   )
 }
 
+/**
+ * 找 `var ytInitialPlayerResponse = { ... };` 这个 statement 里的 JSON。
+ * 用一个不贪心 regex 抓到 "{" 到 "};\n  var"（或" "）之间的内容。
+ */
 function extractPlayerResponse(html: string): any | null {
-  // 找 "ytInitialPlayerResponse = " 起点
-  const marker = "ytInitialPlayerResponse = "
-  const i = html.indexOf(marker)
-  if (i < 0) return null
-
-  // 找第一个 { (对象起点)
-  let j = i + marker.length
-  while (j < html.length && html[j] !== "{") j++
-  if (j >= html.length) return null
-
-  // 字符串感知的括号匹配：找到 depth=0 的最外层 }
-  let depth = 0
-  let inString = false
-  let escapeNext = false
-  for (let k = j; k < html.length; k++) {
-    const c = html[k]
-    if (escapeNext) {
-      escapeNext = false
-      continue
-    }
-    if (c === "\\" && inString) {
-      escapeNext = true
-      continue
-    }
-    if (c === '"' && !escapeNext) {
-      inString = !inString
-      continue
-    }
-    if (inString) continue
-    if (c === "{") depth++
-    else if (c === "}") {
-      depth--
-      if (depth === 0) {
-        const json = html.substring(j, k + 1)
-        try {
-          return JSON.parse(json)
-        } catch (e: any) {
-          // parse 失败 → log 然后回退
-          console.error("[transcript-api] JSON parse err:", e?.message?.slice(0, 200))
-          console.error("[transcript-api] json head (300c):", json.slice(0, 300))
-          console.error("[transcript-api] json tail (200c):", json.slice(-200))
-          return null
-        }
-      }
-    }
+  // 模式：ytInitialPlayerResponse = { ... };   （行尾或下一行 var 之前）
+  // 让非贪心 .+? 在第一个 }; 处停
+  const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?\})\s*;\s*(?=\n\s*(?:var|if|const|let|function|\}|\)|$))/m)
+  if (!m || !m[1]) {
+    console.log("[transcript-api] regex no match, html len:", html.length)
+    return null
   }
-  return null
+  const json = m[1]
+  console.log("[transcript-api] regex matched, json len:", json.length)
+  try {
+    return JSON.parse(json)
+  } catch (e: any) {
+    console.error("[transcript-api] JSON parse err:", e?.message?.slice(0, 200))
+    console.error("[transcript-api] json head (300c):", json.slice(0, 300))
+    console.error("[transcript-api] json tail (200c):", json.slice(-200))
+    return null
+  }
 }
 
 export async function GET(req: NextRequest) {
