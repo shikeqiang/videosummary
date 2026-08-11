@@ -240,7 +240,7 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   const params = ["fmt=json3"]
   const pot = getInnertubeApiKey()
   if (pot) params.push(`pot=${pot}`)
-  const url = `\${track.baseUrl}\${separator}\${params.join("&")}`
+  const url = `${track.baseUrl}${separator}${params.join("&")}`
   console.log("[transcript] tracks:", tracks.length, "picked:", track.languageCode, track.kind ?? "?")
   console.log("[transcript] url:", url.slice(0, 140))
 
