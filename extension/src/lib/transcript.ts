@@ -249,9 +249,7 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
 
   console.log("[transcript] FULL URL:", url)
   // Server-side 调我们的 /api/youtube/transcript（解决签名过期 / IP / cookie 等问题）
-  const apiBase =
-    (typeof process !== "undefined" && (process as any).env?.PLASMO_PUBLIC_API_BASE_URL) ||
-    "http://localhost:3000"
+  const apiBase = process.env.PLASMO_PUBLIC_API_BASE_URL || "http://localhost:3000"
   console.log("[transcript] calling server-side:", `${apiBase}/api/youtube/transcript?videoId=${videoId}`)
   let serverRes: Response
   try {
