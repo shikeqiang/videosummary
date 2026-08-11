@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server"
+import JSON5 from "json5"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -16,33 +17,50 @@ function pickBestTrack(tracks: any[]): any | null {
 }
 
 /**
- * 找 `var ytInitialPlayerResponse = { ... };` 这个 statement 里的 JS 对象字面量。
- *
- * 注意：YouTube 嵌的是 JavaScript 对象字面量，**不是 strict JSON**！
- * 比如 `{key: "value"}` 而不是 `{"key": "value"}`。unquoted keys 是 JS 合法但 JSON 非法。
- * 所以用 `new Function` eval 它（在服务器端跑，源是 YouTube 可信）。
+ * 从 watch page HTML 抓 `var ytInitialPlayerResponse = { ... };` 里的 JS 对象。
+ * 不用 JSON.parse（不接 unquoted keys），用 JSON5（兼容 JS 对象字面量）。
  */
 function extractPlayerResponse(html: string): any | null {
-  // marker 后面到下一个 `; var` 之前
-  const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{\"responseContext\"[\s\S]+?\})\s*;\s*(?=\n\s*(?:var|if|const|let|function|\}|\)|$))/m)
-  if (!m || !m[1]) {
-    console.log("[transcript-api] regex no match, html len:", html.length)
+  const marker = "ytInitialPlayerResponse = "
+  const i = html.indexOf(marker)
+  if (i < 0) {
+    console.log("[transcript-api] no marker")
     return null
   }
-  const obj = m[1]
-  console.log("[transcript-api] regex matched, obj len:", obj.length)
-  try {
-    // 用 new Function 跑（比 eval 安全——作用域隔离）
-    // 包 return (...) 让我们拿到对象
-    const result = new Function(`return (${obj});`)()
-    if (typeof result !== "object" || result === null) return null
-    return result
-  } catch (e: any) {
-    console.error("[transcript-api] eval err:", e?.message?.slice(0, 200))
-    console.error("[transcript-api] obj head (300c):", obj.slice(0, 300))
-    console.error("[transcript-api] obj tail (200c):", obj.slice(-200))
-    return null
+
+  // 从 marker 后开始找第一个 { (对象起点)
+  let j = i + marker.length
+  while (j < html.length && html[j] !== "{") j++
+  if (j >= html.length) return null
+
+  // 字符串感知的括号匹配，找最外层 }
+  let depth = 0
+  let inString = false
+  let escapeNext = false
+  for (let k = j; k < html.length; k++) {
+    const c = html[k]
+    if (escapeNext) { escapeNext = false; continue }
+    if (c === "\\" && inString) { escapeNext = true; continue }
+    if (c === '"' && !escapeNext) { inString = !inString; continue }
+    if (inString) continue
+    if (c === "{") depth++
+    else if (c === "}") {
+      depth--
+      if (depth === 0) {
+        const obj = html.substring(j, k + 1)
+        console.log("[transcript-api] obj captured, len:", obj.length)
+        // JSON5 接受 unquoted keys / 单引号 / trailing commas / NaN / Infinity 等
+        try {
+          return JSON5.parse(obj)
+        } catch (e: any) {
+          console.error("[transcript-api] JSON5 err:", e?.message?.slice(0, 200))
+          console.error("[transcript-api] obj head:", obj.slice(0, 300))
+          return null
+        }
+      }
+    }
   }
+  return null
 }
 
 export async function GET(req: NextRequest) {
