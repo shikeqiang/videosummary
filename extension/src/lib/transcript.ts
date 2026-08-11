@@ -253,8 +253,9 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   console.log("[transcript] calling server-side:", `${apiBase}/api/youtube/transcript?videoId=${videoId}`)
   let serverRes: Response
   try {
+    // credentials: "omit" — 这个端点不需要 cookie（CORS 通配 * 才能用）
     serverRes = await fetch(`${apiBase}/api/youtube/transcript?videoId=${encodeURIComponent(videoId)}`, {
-      credentials: "include"
+      credentials: "omit"
     })
   } catch (e: any) {
     console.warn("[transcript] server fetch err:", e?.message ?? e)
