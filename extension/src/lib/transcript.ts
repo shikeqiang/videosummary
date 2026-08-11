@@ -119,7 +119,50 @@ function findPlayerResponse(videoId: string): Promise<YtPlayerResponse | null> {
       console.log("[transcript] no INNERTUBE_API_KEY (ytcfg gone)")
     }
 
-    console.warn("[transcript] all 4 sources failed for videoId:", videoId)
+    // 6) Plan C：fetch watch page HTML，parse 嵌在 src 里的 ytInitialPlayerResponse
+    try {
+      console.log("[transcript] source 6: fetching watch page HTML for", videoId)
+      const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+        credentials: "include"
+      })
+      if (res.ok) {
+        const html = await res.text()
+        // 找 ytInitialPlayerResponse = { ... };  段
+        // 用 indexOf + 括号计数，避免正则匹配到嵌套 }
+        const marker = "ytInitialPlayerResponse = "
+        const i = html.indexOf(marker)
+        if (i >= 0) {
+          let j = i + marker.length
+          let depth = 0
+          let end = -1
+          // 第一个 { 一定是对象起点
+          while (j < html.length && html[j] !== "{") j++
+          for (; j < html.length; j++) {
+            if (html[j] === "{") depth++
+            else if (html[j] === "}") {
+              depth--
+              if (depth === 0) { end = j + 1; break }
+            }
+          }
+          if (end > 0) {
+            try {
+              const json = JSON.parse(html.substring(i + marker.length, end)) as YtPlayerResponse
+              if (json?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+                console.log("[transcript] source 6: HTML parse, tracks:", json.captions!.playerCaptionsTracklistRenderer!.captionTracks!.length)
+                return json
+              }
+            } catch (e: any) {
+              console.warn("[transcript] source 6: parse err:", e?.message ?? e)
+            }
+          }
+        }
+        console.log("[transcript] source 6: no ytInitialPlayerResponse in HTML")
+      }
+    } catch (e: any) {
+      console.warn("[transcript] source 6 err:", e?.message ?? e)
+    }
+
+    console.warn("[transcript] all 5 sources failed for videoId:", videoId)
     return null
   })()
 }
