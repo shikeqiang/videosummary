@@ -50,51 +50,77 @@ type YtPlayerResponse = {
  */
 function findPlayerResponse(videoId: string): Promise<YtPlayerResponse | null> {
   return (async () => {
-    const w = window as unknown as Record<string, unknown>
+    const w = window as unknown as any
 
     // 1) window.ytInitialPlayerResponse（直接 SPA 加载时存在）
     const a = w.ytInitialPlayerResponse as YtPlayerResponse | undefined
     if (a?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+      console.log("[transcript] source 1: window.ytInitialPlayerResponse")
       return a
     }
 
-    // 2) fallback: YouTube InnerTube API /youtubei/v1/player
-    //    SPA 切换视频时全局变量不会更新，这个 API 总能拿到当前视频的 player response
+    // 2) window.yt.player.getPlayerResponse() — 尝试拿 player 实例
+    //    YouTube 在 watch 页挂了一个 yt-player 元素，可通过 DOM 或 window.yt 拿
+    try {
+      const player =
+        w.yt?.player?.getPlayerResponse?.() ??
+        w.yt?.player?.getPlayerResponse?.call?.(w.yt?.player)
+      if (player?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+        console.log("[transcript] source 2: window.yt.player.getPlayerResponse()")
+        return player as YtPlayerResponse
+      }
+    } catch {}
+
+    // 3) document.getElementById('movie_player').getPlayerResponse()
+    try {
+      const el = document.getElementById("movie_player") as any
+      const player = el?.getPlayerResponse?.()
+      if (player?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+        console.log("[transcript] source 3: #movie_player.getPlayerResponse()")
+        return player as YtPlayerResponse
+      }
+    } catch {}
+
+    // 4) DOM 搜 #movie_player 下的 __data 或 yt-player 的内部状态
+    try {
+      const el = document.querySelector("yt-player") as any
+      // yt-player 暴露 player state（有时）
+      const state = el?.playerState ?? el?.playerState_
+      if (state?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+        console.log("[transcript] source 4: yt-player.playerState")
+        return state as YtPlayerResponse
+      }
+    } catch {}
+
+    // 5) InnerTube API 兜底（需要 INNERTUBE_API_KEY，但目前已确认 ytcfg 不在了）
     const apiKey = getInnertubeApiKey()
-    if (!apiKey) {
-      console.warn("[transcript] no INNERTUBE_API_KEY, cannot fallback")
-      return null
+    if (apiKey) {
+      try {
+        console.log("[transcript] source 5: InnerTube player API for", videoId)
+        const res = await fetch(
+          `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              videoId,
+              context: { client: { clientName: "WEB", clientVersion: "2.20240101.00.00" } }
+            })
+          }
+        )
+        if (res.ok) {
+          const json = (await res.json()) as YtPlayerResponse
+          if (json?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+            return json
+          }
+        }
+      } catch {}
+    } else {
+      console.log("[transcript] no INNERTUBE_API_KEY (ytcfg gone)")
     }
 
-    try {
-      console.log("[transcript] fallback: calling InnerTube player API for", videoId)
-      const res = await fetch(
-        `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            videoId,
-            context: {
-              client: { clientName: "WEB", clientVersion: "2.20240101.00.00" }
-            }
-          })
-        }
-      )
-      if (!res.ok) {
-        console.warn("[transcript] InnerTube API non-OK:", res.status)
-        return null
-      }
-      const json = (await res.json()) as YtPlayerResponse
-      if (json?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-        return json
-      }
-      console.warn("[transcript] InnerTube API returned no captions")
-      return null
-    } catch (e: any) {
-      console.warn("[transcript] InnerTube API err:", e?.message ?? e)
-      return null
-    }
+    console.warn("[transcript] all 4 sources failed for videoId:", videoId)
+    return null
   })()
 }
 
