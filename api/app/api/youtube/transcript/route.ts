@@ -24,7 +24,7 @@ function pickBestTrack(tracks: any[]): any | null {
  */
 function extractPlayerResponse(html: string): any | null {
   // marker 后面到下一个 `; var` 之前
-  const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?\})\s*;\s*(?=\n\s*(?:var|if|const|let|function|\}|\)|$))/m)
+  const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{\"responseContext\"[\s\S]+?\})\s*;\s*(?=\n\s*(?:var|if|const|let|function|\}|\)|$))/m)
   if (!m || !m[1]) {
     console.log("[transcript-api] regex no match, html len:", html.length)
     return null
