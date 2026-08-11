@@ -223,32 +223,38 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   console.log("[transcript] ytInitialPlayerResponse exists:", typeof w.ytInitialPlayerResponse)
 
   const playerResp = await findPlayerResponse(videoId)
-  if (!playerResp) {
-    console.log("[transcript] early-return: no playerResponse (window + API fallback both failed)")
-    return null
+  console.log("[transcript] playerResp found:", !!playerResp, "has captions:", playerResp ? !!playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks : false)
+  // 不直接 return null：即使 client 拿不到 player response，下面 server-side 还能兜底
+  if (playerResp) {
+    const tracks = playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    if (tracks && tracks.length > 0) {
+      const track = pickBestTrack(tracks)
+      if (track) {
+        // client-side 路径：直接 fetch timedtext
+        const separator = track.baseUrl.includes("?") ? "&" : "?"
+        const params = ["fmt=json3"]
+        const pot = getInnertubeApiKey()
+        if (pot) params.push(`pot=${pot}`)
+        const url = `${track.baseUrl}${separator}${params.join("&")}`
+        console.log("[transcript] client-side: tracks:", tracks.length, "picked:", track.languageCode, "url head:", url.slice(0, 80))
+        try {
+          const res = await fetch(url, { credentials: "include" })
+          const ct = res.headers.get("content-type") ?? ""
+          console.log("[transcript] client-side status:", res.status, "ct:", ct.slice(0, 60))
+          if (res.ok && ct.includes("application/json")) {
+            const json = await res.json()
+            // 解析 events...
+          } else {
+            console.warn("[transcript] client-side failed, falling back to server")
+          }
+        } catch (e: any) {
+          console.warn("[transcript] client-side err:", e?.message ?? e)
+        }
+      }
+    }
   }
-  console.log("[transcript] playerResp found, has captions:", !!playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks)
 
-  const tracks = playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks
-  if (!tracks || tracks.length === 0) return null
-
-  // 单一变量：parse 出来的 player response（client 路径填，或 server-data 路径填）
-  let json: any = null
-
-  const track = pickBestTrack(tracks)
-  if (!track) return null
-
-  // 构造 fmt=json3 的字幕 url
-  const separator = track.baseUrl.includes("?") ? "&" : "?"
-  const params = ["fmt=json3"]
-  const pot = getInnertubeApiKey()
-  if (pot) params.push(`pot=${pot}`)
-  const url = `${track.baseUrl}${separator}${params.join("&")}`
-  console.log("[transcript] tracks:", tracks.length, "picked:", track.languageCode, track.kind ?? "?")
-  console.log("[transcript] url:", url.slice(0, 140))
-
-  console.log("[transcript] FULL URL:", url)
-  // Server-side 调我们的 /api/youtube/transcript（解决签名过期 / IP / cookie 等问题）
+  // Server-side 兜底（永远会跑）
   const apiBase = process.env.PLASMO_PUBLIC_API_BASE_URL || "http://localhost:3000"
   console.log("[transcript] calling server-side:", `${apiBase}/api/youtube/transcript?videoId=${videoId}`)
   let serverRes: Response
@@ -273,57 +279,16 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
     console.warn("[transcript] server returned no segments, error:", serverJson?.error)
     return null
   }
-  // 把 server response 转成 YtPlayerResponse 形态，让后面的解析代码继续工作
-  json = {
-    captions: {
-      playerCaptionsTracklistRenderer: {
-        captionTracks: [{ languageCode: serverJson.languageCode, baseUrl: "(server-side-fetched)" }]
-      }
-    }
-  } as any
-  // 把 server 返回的 events 也塞进去（兼容后面那段解析）
-  ;(json as any)._serverEvents = serverJson.segments
-  ;(json as any)._serverTitle = serverJson.title
-  ;(json as any)._serverChannel = serverJson.channel
-  ;(json as any)._serverVideoId = serverJson.videoId
-  ;(json as any)._serverDuration = 0
-  // 让后面从 _serverEvents 解析
-  ;(json as any)._useServerData = true
-
-  console.log("[transcript] events:", json?.events?.length ?? 0)
-  const evList: Array<{ tStartMs: number; dDurationMs: number; segs?: Array<{ utf8: string }> }> =
-    json?.events ?? []
-  const segments: TranscriptSegment[] = []
-  const texts: string[] = []
-
-  for (const ev of evList) {
-    const segs = ev.segs ?? []
-    const text = segs.map((s) => s.utf8 ?? "").join("").trim()
-    if (!text || text === "\n") continue
-    segments.push({
-      startMs: ev.tStartMs ?? 0,
-      durationMs: ev.dDurationMs ?? 0,
-      text
-    })
-    texts.push(text)
-  }
-
-  const title = (w.ytInitialPlayerResponse as any)?.videoDetails?.title
-    ?? document.title?.replace(" - YouTube", "")
-    ?? ""
-  const channel = (w.ytInitialPlayerResponse as any)?.videoDetails?.author ?? ""
-  const durationMs = (w.ytInitialPlayerResponse as any)?.videoDetails?.lengthSeconds
-    ? Number((w.ytInitialPlayerResponse as any).videoDetails.lengthSeconds) * 1000
-    : 0
-
+  // Server data path：直接返回（不用走 client-side 解析）
+  console.log("[transcript] using server-side data, segments:", serverJson.segments.length)
   return {
     videoId,
-    title,
-    channel,
-    durationMs,
-    languageCode: track.languageCode,
-    segments,
-    plainText: texts.join(" ")
+    title: serverJson.title ?? "",
+    channel: serverJson.channel ?? "",
+    durationMs: 0,
+    languageCode: serverJson.languageCode ?? "en",
+    segments: serverJson.segments,
+    plainText: (serverJson.segments ?? []).map((s: any) => s.text ?? "").join(" ")
   }
 }
 
