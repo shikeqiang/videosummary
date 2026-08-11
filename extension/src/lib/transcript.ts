@@ -247,14 +247,21 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   let json: any
   try {
     const res = await fetch(url, { credentials: "include" })
-    console.log("[transcript] status:", res.status, res.headers.get("content-type")?.slice(0,40))
+    const ct = res.headers.get("content-type") ?? ""
+    console.log("[transcript] status:", res.status, "ct:", ct.slice(0, 60))
     if (!res.ok) {
       const t = await res.text().catch(() => "")
       console.warn("[transcript] non-OK body head:", t.slice(0, 200))
       return null
     }
+    if (!ct.includes("application/json")) {
+      const t = await res.text().catch(() => "")
+      console.warn("[transcript] non-JSON body head:", t.slice(0, 300))
+      return null
+    }
     json = await res.json()
-  } catch {
+  } catch (e: any) {
+    console.warn("[transcript] fetch err:", e?.message ?? e)
     return null
   }
 
