@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server"
-import JSON5 from "json5"
 
 export const runtime = "nodejs"
 export const dynamic = "force-dynamic"
@@ -17,9 +16,16 @@ function pickBestTrack(tracks: any[]): any | null {
 }
 
 /**
- * 从 watch page HTML 抓 `var ytInitialPlayerResponse = { ... };` 里的 JS 对象。
- * 不用 JSON.parse（不接 unquoted keys），用 JSON5（兼容 JS 对象字面量）。
+ * 把 YouTube 的 JS object literal（unquoted keys）转成合法 JSON
+ * - `{key: "value"}` → `{"key": "value"}`
+ * - 已经在引号里的 key 不动
+ * - 字符串值里不能有 unquoted 字符（实际场景里 YouTube 字符串都 quoted，安全）
  */
+function fixUnquotedKeys(s: string): string {
+  // 关键替换：匹配 [{,] 后到 : 前的标识符，加双引号
+  return s.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*):/g, '$1"$2"$3:')
+}
+
 function extractPlayerResponse(html: string): any | null {
   const marker = "ytInitialPlayerResponse = "
   const i = html.indexOf(marker)
@@ -28,12 +34,11 @@ function extractPlayerResponse(html: string): any | null {
     return null
   }
 
-  // 从 marker 后开始找第一个 { (对象起点)
   let j = i + marker.length
   while (j < html.length && html[j] !== "{") j++
   if (j >= html.length) return null
 
-  // 字符串感知的括号匹配，找最外层 }
+  // 字符串感知的括号匹配
   let depth = 0
   let inString = false
   let escapeNext = false
@@ -49,12 +54,15 @@ function extractPlayerResponse(html: string): any | null {
       if (depth === 0) {
         const obj = html.substring(j, k + 1)
         console.log("[transcript-api] obj captured, len:", obj.length)
-        // JSON5 接受 unquoted keys / 单引号 / trailing commas / NaN / Infinity 等
+        // 1) 把 unquoted keys 加引号
+        const fixed = fixUnquotedKeys(obj)
+        // 2) JSON.parse
         try {
-          return JSON5.parse(obj)
+          return JSON.parse(fixed)
         } catch (e: any) {
-          console.error("[transcript-api] JSON5 err:", e?.message?.slice(0, 200))
-          console.error("[transcript-api] obj head:", obj.slice(0, 300))
+          console.error("[transcript-api] JSON.parse err:", e?.message?.slice(0, 200))
+          console.error("[transcript-api] obj head:", fixed.slice(0, 300))
+          console.error("[transcript-api] obj tail:", fixed.slice(-200))
           return null
         }
       }
@@ -81,7 +89,7 @@ export async function GET(req: NextRequest) {
       )
     }
     const html = await watchRes.text()
-    console.log("[transcript-api] html len:", html.length, "has marker:", html.includes("ytInitialPlayerResponse"))
+    console.log("[transcript-api] html len:", html.length)
     const player = extractPlayerResponse(html)
     if (!player) {
       return NextResponse.json({ error: "no player response in HTML" }, { status: 502 })
@@ -101,10 +109,7 @@ export async function GET(req: NextRequest) {
       { headers: { "User-Agent": UA }, cache: "no-store" }
     )
     if (!capRes.ok) {
-      return NextResponse.json(
-        { error: "caption fetch failed", status: capRes.status },
-        { status: 502 }
-      )
+      return NextResponse.json({ error: "caption fetch failed", status: capRes.status }, { status: 502 })
     }
     const capJson = (await capRes.json()) as any
 
@@ -115,11 +120,7 @@ export async function GET(req: NextRequest) {
       const segs = ev.segs ?? []
       const text = segs.map((s: any) => s.utf8 ?? "").join("").trim()
       if (!text || text === "\n") continue
-      segments.push({
-        startMs: ev.tStartMs ?? 0,
-        durationMs: ev.dDurationMs ?? 0,
-        text
-      })
+      segments.push({ startMs: ev.tStartMs ?? 0, durationMs: ev.dDurationMs ?? 0, text })
       texts.push(text)
     }
 
