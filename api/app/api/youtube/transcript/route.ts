@@ -16,25 +16,31 @@ function pickBestTrack(tracks: any[]): any | null {
 }
 
 /**
- * 找 `var ytInitialPlayerResponse = { ... };` 这个 statement 里的 JSON。
- * 用一个不贪心 regex 抓到 "{" 到 "};\n  var"（或" "）之间的内容。
+ * 找 `var ytInitialPlayerResponse = { ... };` 这个 statement 里的 JS 对象字面量。
+ *
+ * 注意：YouTube 嵌的是 JavaScript 对象字面量，**不是 strict JSON**！
+ * 比如 `{key: "value"}` 而不是 `{"key": "value"}`。unquoted keys 是 JS 合法但 JSON 非法。
+ * 所以用 `new Function` eval 它（在服务器端跑，源是 YouTube 可信）。
  */
 function extractPlayerResponse(html: string): any | null {
-  // 模式：ytInitialPlayerResponse = { ... };   （行尾或下一行 var 之前）
-  // 让非贪心 .+? 在第一个 }; 处停
+  // marker 后面到下一个 `; var` 之前
   const m = html.match(/ytInitialPlayerResponse\s*=\s*(\{[\s\S]+?\})\s*;\s*(?=\n\s*(?:var|if|const|let|function|\}|\)|$))/m)
   if (!m || !m[1]) {
     console.log("[transcript-api] regex no match, html len:", html.length)
     return null
   }
-  const json = m[1]
-  console.log("[transcript-api] regex matched, json len:", json.length)
+  const obj = m[1]
+  console.log("[transcript-api] regex matched, obj len:", obj.length)
   try {
-    return JSON.parse(json)
+    // 用 new Function 跑（比 eval 安全——作用域隔离）
+    // 包 return (...) 让我们拿到对象
+    const result = new Function(`return (${obj});`)()
+    if (typeof result !== "object" || result === null) return null
+    return result
   } catch (e: any) {
-    console.error("[transcript-api] JSON parse err:", e?.message?.slice(0, 200))
-    console.error("[transcript-api] json head (300c):", json.slice(0, 300))
-    console.error("[transcript-api] json tail (200c):", json.slice(-200))
+    console.error("[transcript-api] eval err:", e?.message?.slice(0, 200))
+    console.error("[transcript-api] obj head (300c):", obj.slice(0, 300))
+    console.error("[transcript-api] obj tail (200c):", obj.slice(-200))
     return null
   }
 }
