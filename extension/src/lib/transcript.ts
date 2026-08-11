@@ -244,6 +244,7 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   console.log("[transcript] tracks:", tracks.length, "picked:", track.languageCode, track.kind ?? "?")
   console.log("[transcript] url:", url.slice(0, 140))
 
+  console.log("[transcript] FULL URL:", url)
   let json: any
   try {
     const res = await fetch(url, { credentials: "include" })
@@ -256,7 +257,8 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
     }
     if (!ct.includes("application/json")) {
       const t = await res.text().catch(() => "")
-      console.warn("[transcript] non-JSON body head:", t.slice(0, 300))
+      const head = t.slice(0, 300)
+      console.warn(`[transcript] non-JSON body len=${t.length} head: >>>${head}<<<`)
       return null
     }
     json = await res.json()
