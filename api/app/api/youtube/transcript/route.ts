@@ -54,15 +54,20 @@ function extractPlayerResponse(html: string): any | null {
       if (depth === 0) {
         const obj = html.substring(j, k + 1)
         console.log("[transcript-api] obj captured, len:", obj.length)
-        // 1) 把 unquoted keys 加引号
-        const fixed = fixUnquotedKeys(obj)
-        // 2) JSON.parse
+        // 用 new Function 跑（obj 边界已经画对了，里面是合法 JS 对象字面量）
         try {
-          return JSON.parse(fixed)
+          // eslint-disable-next-line no-new-func
+          const result = new Function(`return (${obj});`)()
+          if (typeof result !== "object" || result === null) {
+            console.error("[transcript-api] new Function returned non-object:", typeof result)
+            return null
+          }
+          console.log("[transcript-api] parsed via new Function, keys:", Object.keys(result).slice(0, 5))
+          return result
         } catch (e: any) {
-          console.error("[transcript-api] JSON.parse err:", e?.message?.slice(0, 200))
-          console.error("[transcript-api] obj head:", fixed.slice(0, 300))
-          console.error("[transcript-api] obj tail:", fixed.slice(-200))
+          console.error("[transcript-api] new Function err:", e?.message?.slice(0, 200))
+          console.error("[transcript-api] obj head:", obj.slice(0, 300))
+          console.error("[transcript-api] obj tail:", obj.slice(-200))
           return null
         }
       }
