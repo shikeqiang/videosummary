@@ -38,10 +38,10 @@ function extractPlayerResponse(html: string): any | null {
         try {
           const result = new Function(`return (${obj});`)()
           if (typeof result !== "object" || result === null) return null
+          console.log("[transcript-api] parsed via new Function")
           return result
         } catch (e: any) {
           console.error("[transcript-api] new Function err:", e?.message)
-          console.error("[transcript-api] obj head:", obj.slice(0, 200))
           return null
         }
       }
@@ -59,49 +59,40 @@ export async function GET(req: NextRequest) {
       `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
       { headers: { "User-Agent": UA }, cache: "no-store" }
     )
-    if (!watchRes.ok) {
-      return NextResponse.json({ error: "watch fetch failed", status: watchRes.status }, { status: 502 })
-    }
+    if (!watchRes.ok) return NextResponse.json({ error: "watch fetch failed", status: watchRes.status }, { status: 502 })
     const html = await watchRes.text()
     console.log("[transcript-api] html len:", html.length)
     const player = extractPlayerResponse(html)
-    if (!player) {
-      return NextResponse.json({ error: "no player response in HTML" }, { status: 502 })
-    }
+    if (!player) return NextResponse.json({ error: "no player response in HTML" }, { status: 502 })
 
     const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
     if (!tracks?.length) return NextResponse.json({ error: "no captions" }, { status: 404 })
     const track = pickBestTrack(tracks)
     if (!track?.baseUrl) return NextResponse.json({ error: "no track baseUrl" }, { status: 502 })
 
-    // 看 track 详情
-    console.log("[transcript-api] track:", JSON.stringify({
-      lang: track.languageCode,
-      name: track.name,
-      kind: track.kind,
-      baseUrl: track.baseUrl?.slice(0, 100)
-    }))
+    // 关键 log：序列化整个 track 让我们看到 baseUrl 等所有字段
+    console.log("[transcript-api] track dump:", JSON.stringify(track).slice(0, 800))
 
-    // fetch timedtext 加 fmt=json3 + 兜底
     const sep = track.baseUrl.includes("?") ? "&" : "?"
     const capUrl = `${track.baseUrl}${sep}fmt=json3`
-    console.log("[transcript-api] capUrl:", capUrl.slice(0, 140))
+    console.log("[transcript-api] capUrl full:", capUrl)
+
     const capRes = await fetch(capUrl, { headers: { "User-Agent": UA }, cache: "no-store" })
     console.log("[transcript-api] capRes status:", capRes.status, "ct:", capRes.headers.get("content-type")?.slice(0, 60))
     if (!capRes.ok) {
       const t = await capRes.text().catch(() => "")
-      console.error("[transcript-api] cap non-OK body head:", t.slice(0, 200))
+      console.error("[transcript-api] cap non-OK body head 200c:", t.slice(0, 200))
       return NextResponse.json({ error: "caption fetch failed", status: capRes.status }, { status: 502 })
     }
     const capText = await capRes.text()
-    console.log("[transcript-api] cap body len:", capText.length, "head:", capText.slice(0, 100))
+    console.log("[transcript-api] cap body len:", capText.length, "head 100c:", capText.slice(0, 100).replace(/\n/g, "\\n"))
     let capJson: any
     try {
       capJson = JSON.parse(capText)
     } catch (e: any) {
       console.error("[transcript-api] cap JSON.parse err:", e?.message)
-      console.error("[transcript-api] cap body tail:", capText.slice(-200))
-      return NextResponse.json({ error: "internal", message: e?.message }, { status: 500 })
+      console.error("[transcript-api] cap body tail 200c:", capText.slice(-200).replace(/\n/g, "\\n"))
+      return NextResponse.json({ error: "internal", message: "cap parse: " + e?.message }, { status: 500 })
     }
 
     const evList: any[] = capJson?.events ?? []
