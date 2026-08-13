@@ -1,19 +1,21 @@
 /**
- * YouTube 视频 transcript 提取（不需要外部 API）
+ * YouTube 视频 transcript 提取（**完全在浏览器上下文跑**）
  *
- * 核心思路：
- *   1. 注入到 youtube.com 后，从 window 拿到 ytInitialPlayerResponse
- *   2. 找到 captionTracks，选择第一个可用的（优先手动字幕）
- *   3. 拿到 baseUrl，附加 &fmt=json3 得到结构化 JSON
- *   4. 解析并清洗成纯文本 + 时间戳
+ * 为什么不能 server 端 fetch：
+ *   - YouTube timedtext API 现在强要 `pot` token（client-side JS 生成）
+ *   - 扩展 content script 在 youtube.com 域名下运行，自动带 cookie + pot
+ *
+ * 流程（全部在浏览器 fetch + cookies include）：
+ *   1) 拉 watch page HTML（找 player response）
+ *   2) 字符串感知的括号匹配 parse 整个 player response JS 对象
+ *   3) 找 captionTracks，挑最好的 track（手动 > 英文 > 第一个）
+ *   4) fetch timedtext URL（带 cookies，pot 自动）
+ *   5) 解析 JSON3 events → segments + plainText
  */
 
 export interface TranscriptSegment {
-  /** 起始时间 ms */
   startMs: number
-  /** 时长 ms */
   durationMs: number
-  /** 文字 */
   text: string
 }
 
@@ -24,7 +26,6 @@ export interface TranscriptResult {
   durationMs: number
   languageCode: string
   segments: TranscriptSegment[]
-  /** 拼接后的纯文本 */
   plainText: string
 }
 
@@ -41,254 +42,168 @@ type YtPlayerResponse = {
       captionTracks?: YtCaptionTrack[]
     }
   }
+  videoDetails?: {
+    title?: string
+    author?: string
+    lengthSeconds?: string | number
+  }
 }
 
 /**
- * 从窗口的全局变量提取 playerResponse
- *
- * 包含容错：有时 ytInitialPlayerResponse 不在全局，有时在 ytInitialData 中
+ * 字符串感知的括号匹配：找到 { ... } 配对位置
+ * (避免 {..:  "}"} 之类字符串里的 } 误判)
  */
-function findPlayerResponse(videoId: string): Promise<YtPlayerResponse | null> {
-  return (async () => {
-    const w = window as unknown as any
-
-    // 1) window.ytInitialPlayerResponse（直接 SPA 加载时存在）
-    const a = w.ytInitialPlayerResponse as YtPlayerResponse | undefined
-    if (a?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-      console.log("[transcript] source 1: window.ytInitialPlayerResponse")
-      return a
+function findMatchingBrace(s: string, start: number): number {
+  let depth = 0
+  let inString = false
+  let escapeNext = false
+  for (let k = start; k < s.length; k++) {
+    const c = s[k]
+    if (escapeNext) { escapeNext = false; continue }
+    if (c === "\\" && inString) { escapeNext = true; continue }
+    if (c === '"' && !escapeNext) { inString = !inString; continue }
+    if (inString) continue
+    if (c === "{") depth++
+    else if (c === "}") {
+      depth--
+      if (depth === 0) return k
     }
+  }
+  return -1
+}
 
-    // 2) window.yt.player.getPlayerResponse() — 尝试拿 player 实例
-    //    YouTube 在 watch 页挂了一个 yt-player 元素，可通过 DOM 或 window.yt 拿
-    try {
-      const player =
-        w.yt?.player?.getPlayerResponse?.() ??
-        w.yt?.player?.getPlayerResponse?.call?.(w.yt?.player)
-      if (player?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-        console.log("[transcript] source 2: window.yt.player.getPlayerResponse()")
-        return player as YtPlayerResponse
-      }
-    } catch {}
-
-    // 3) document.getElementById('movie_player').getPlayerResponse()
-    try {
-      const el = document.getElementById("movie_player") as any
-      const player = el?.getPlayerResponse?.()
-      if (player?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-        console.log("[transcript] source 3: #movie_player.getPlayerResponse()")
-        return player as YtPlayerResponse
-      }
-    } catch {}
-
-    // 4) DOM 搜 #movie_player 下的 __data 或 yt-player 的内部状态
-    try {
-      const el = document.querySelector("yt-player") as any
-      // yt-player 暴露 player state（有时）
-      const state = el?.playerState ?? el?.playerState_
-      if (state?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-        console.log("[transcript] source 4: yt-player.playerState")
-        return state as YtPlayerResponse
-      }
-    } catch {}
-
-    // 5) InnerTube API 兜底（需要 INNERTUBE_API_KEY，但目前已确认 ytcfg 不在了）
-    const apiKey = getInnertubeApiKey()
-    if (apiKey) {
-      try {
-        console.log("[transcript] source 5: InnerTube player API for", videoId)
-        const res = await fetch(
-          `https://www.youtube.com/youtubei/v1/player?key=${apiKey}`,
-          {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              videoId,
-              context: { client: { clientName: "WEB", clientVersion: "2.20240101.00.00" } }
-            })
-          }
-        )
-        if (res.ok) {
-          const json = (await res.json()) as YtPlayerResponse
-          if (json?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-            return json
-          }
-        }
-      } catch {}
-    } else {
-      console.log("[transcript] no INNERTUBE_API_KEY (ytcfg gone)")
-    }
-
-    // 6) Plan C：fetch watch page HTML，parse 嵌在 src 里的 ytInitialPlayerResponse
-    try {
-      console.log("[transcript] source 6: fetching watch page HTML for", videoId)
-      const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
-        credentials: "include"
-      })
-      if (res.ok) {
-        const html = await res.text()
-        // 找 ytInitialPlayerResponse = { ... };  段
-        // 用 indexOf + 括号计数，避免正则匹配到嵌套 }
-        const marker = "ytInitialPlayerResponse = "
-        const i = html.indexOf(marker)
-        if (i >= 0) {
-          let j = i + marker.length
-          let depth = 0
-          let end = -1
-          // 第一个 { 一定是对象起点
-          while (j < html.length && html[j] !== "{") j++
-          for (; j < html.length; j++) {
-            if (html[j] === "{") depth++
-            else if (html[j] === "}") {
-              depth--
-              if (depth === 0) { end = j + 1; break }
-            }
-          }
-          if (end > 0) {
-            try {
-              const json = JSON.parse(html.substring(i + marker.length, end)) as YtPlayerResponse
-              if (json?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-                console.log("[transcript] source 6: HTML parse, tracks:", json.captions!.playerCaptionsTracklistRenderer!.captionTracks!.length)
-                return json
-              }
-            } catch (e: any) {
-              console.warn("[transcript] source 6: parse err:", e?.message ?? e)
-            }
-          }
-        }
-        console.log("[transcript] source 6: no ytInitialPlayerResponse in HTML")
-      }
-    } catch (e: any) {
-      console.warn("[transcript] source 6 err:", e?.message ?? e)
-    }
-
-    console.warn("[transcript] all client-side sources failed for videoId:", videoId)
+function extractPlayerResponse(html: string): YtPlayerResponse | null {
+  const marker = "ytInitialPlayerResponse = "
+  const i = html.indexOf(marker)
+  if (i < 0) return null
+  // 找第一个 {
+  let j = i + marker.length
+  while (j < html.length && html[j] !== "{") j++
+  if (j >= html.length) return null
+  // 找配对的 }
+  const end = findMatchingBrace(html, j)
+  if (end < 0) return null
+  const obj = html.substring(j, end + 1)
+  try {
+    // 用 new Function 跑：YouTube 嵌的是 JS 对象字面量（unquoted keys、单引号等）
+    const result = new Function(`return (${obj});`)()
+    if (typeof result !== "object" || result === null) return null
+    return result as YtPlayerResponse
+  } catch {
     return null
-  })()
+  }
 }
 
-/**
- * 选择最佳字幕轨道：手写 > 英文 > 第一条
- */
 function pickBestTrack(tracks: YtCaptionTrack[]): YtCaptionTrack | null {
-  if (!tracks || tracks.length === 0) return null
-  // 1) 手工上传的（非 ASR）
-  const manual = tracks.find((t) => t.kind !== "asr")
-  if (manual) return manual
-  // 2) 英文
-  const en = tracks.find((t) => t.languageCode === "en" || t.languageCode.startsWith("en."))
-  if (en) return en
-  // 3) 第一条
-  return tracks[0]
+  if (!tracks?.length) return null
+  return (
+    tracks.find((t) => t.kind !== "asr") ??
+    tracks.find((t) => t.languageCode === "en" || t.languageCode?.startsWith("en.")) ??
+    tracks[0]
+  )
 }
 
 /**
- * 从 ytcfg 中获取 INNERTUBE_API_KEY（用于 timedtext fallback）
- */
-function getInnertubeApiKey(): string | null {
-  const w = window as unknown as Record<string, unknown>
-  const cfg = w.ytcfg as { data_?: string } | { data?: string } | undefined
-  // ytcfg 可能是 object (有 .data_ 字符串属性) 或直接 { data: "..." } 形式
-  const data: string | undefined =
-    (cfg as any)?.data_ ?? (cfg as any)?.data ?? (cfg as any)?.body
-  if (typeof data !== "string") {
-    console.log("[transcript] ytcfg type:", typeof cfg, "  keys:", cfg ? Object.keys(cfg as any).slice(0, 8) : "(no ytcfg)")
-    return null
-  }
-  // 多种可能的 key 字段名（YouTube 改过几次）
-  const patterns = [
-    /INNERTUBE_API_KEY\s*:\s*"([A-Za-z0-9_-]+)"/,
-    /"INNERTUBE_API_KEY"\s*:\s*"([A-Za-z0-9_-]+)"/,
-    /"INNERTUBE_API_KEY"\s*=\s*"([A-Za-z0-9_-]+)"/,
-    /INNERTUBE_API_KEY\s*=\s*"([A-Za-z0-9_-]+)"/,
-  ]
-  for (const re of patterns) {
-    const m = data.match(re)
-    if (m) return m[1]
-  }
-  console.log("[transcript] INNERTUBE_API_KEY not found in ytcfg (ytcfg len:", data.length, ")")
-  return null
-}
-
-/**
- * 主入口：抓取视频 transcript
+ * 主入口：拉 transcript（完全在浏览器上下文）
  */
 export async function fetchTranscript(videoId: string): Promise<TranscriptResult | null> {
-  console.log("[transcript] fetchTranscript CALLED with videoId:", JSON.stringify(videoId))
+  console.log("[transcript] fetchTranscript CALLED with videoId:", videoId)
   if (!videoId) {
-    console.log("[transcript] early-return: videoId is empty")
+    console.log("[transcript] early-return: videoId empty")
     return null
   }
-  const w = window as unknown as Record<string, unknown>
-  console.log("[transcript] ytInitialPlayerResponse exists:", typeof w.ytInitialPlayerResponse)
 
-  const playerResp = await findPlayerResponse(videoId)
-  console.log("[transcript] playerResp found:", !!playerResp, "has captions:", playerResp ? !!playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks : false)
-  // 不直接 return null：即使 client 拿不到 player response，下面 server-side 还能兜底
-  if (playerResp) {
-    const tracks = playerResp.captions?.playerCaptionsTracklistRenderer?.captionTracks
-    if (tracks && tracks.length > 0) {
-      const track = pickBestTrack(tracks)
-      if (track) {
-        // client-side 路径：直接 fetch timedtext
-        const separator = track.baseUrl.includes("?") ? "&" : "?"
-        const params = ["fmt=json3"]
-        const pot = getInnertubeApiKey()
-        if (pot) params.push(`pot=${pot}`)
-        const url = `${track.baseUrl}${separator}${params.join("&")}`
-        console.log("[transcript] client-side: tracks:", tracks.length, "picked:", track.languageCode, "url head:", url.slice(0, 80))
-        try {
-          const res = await fetch(url, { credentials: "include" })
-          const ct = res.headers.get("content-type") ?? ""
-          console.log("[transcript] client-side status:", res.status, "ct:", ct.slice(0, 60))
-          if (res.ok && ct.includes("application/json")) {
-            const json = await res.json()
-            // 解析 events...
-          } else {
-            console.warn("[transcript] client-side failed, falling back to server")
-          }
-        } catch (e: any) {
-          console.warn("[transcript] client-side err:", e?.message ?? e)
-        }
-      }
-    }
-  }
-
-  // Server-side 兜底（永远会跑）
-  const apiBase = process.env.PLASMO_PUBLIC_API_BASE_URL || "http://localhost:3000"
-  console.log("[transcript] calling server-side:", `${apiBase}/api/youtube/transcript?videoId=${videoId}`)
-  let serverRes: Response
   try {
-    // credentials: "omit" — 这个端点不需要 cookie（CORS 通配 * 才能用）
-    serverRes = await fetch(`${apiBase}/api/youtube/transcript?videoId=${encodeURIComponent(videoId)}`, {
-      credentials: "omit"
-    })
-  } catch (e: any) {
-    console.warn("[transcript] server fetch err:", e?.message ?? e)
+    // 1) 拉 watch page HTML（带 cookies）
+    console.log("[transcript] fetching watch page HTML")
+    const watchRes = await fetch(
+      `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
+      { credentials: "include" }
+    )
+    if (!watchRes.ok) {
+      console.log("[transcript] watch fetch failed:", watchRes.status)
+      return null
+    }
+    const html = await watchRes.text()
+    console.log("[transcript] html len:", html.length)
+
+    // 2) parse player response
+    const player = extractPlayerResponse(html)
+    if (!player) {
+      console.log("[transcript] no player response extracted")
+      return null
+    }
+    console.log("[transcript] player keys:", Object.keys(player).slice(0, 6))
+
+    // 3) 拿 caption tracks
+    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    if (!tracks?.length) {
+      console.log("[transcript] no caption tracks")
+      return null
+    }
+    const track = pickBestTrack(tracks)
+    if (!track?.baseUrl) {
+      console.log("[transcript] no track baseUrl")
+      return null
+    }
+    console.log("[transcript] track:", track.languageCode, track.kind ?? "?")
+
+    // 4) fetch timedtext（带 cookies，浏览器自动带 pot）
+    const sep = track.baseUrl.includes("?") ? "&" : "?"
+    const capUrl = `${track.baseUrl}${sep}fmt=json3`
+    console.log("[transcript] fetching timedtext, len:", capUrl.length)
+    const capRes = await fetch(capUrl, { credentials: "include" })
+    console.log("[transcript] capRes status:", capRes.status, "ct:", capRes.headers.get("content-type")?.slice(0, 40))
+    if (!capRes.ok) {
+      console.log("[transcript] cap fetch failed")
+      return null
+    }
+    const capText = await capRes.text()
+    if (!capText || !capText.trimStart().startsWith("{")) {
+      console.log("[transcript] cap body not JSON, len:", capText.length)
+      return null
+    }
+    let capJson: any
+    try {
+      capJson = JSON.parse(capText)
+    } catch (e) {
+      console.log("[transcript] cap JSON.parse err:", (e as Error).message)
+      return null
+    }
+
+    // 5) parse segments
+    const evList: any[] = capJson?.events ?? []
+    const segments: TranscriptSegment[] = []
+    const texts: string[] = []
+    for (const ev of evList) {
+      const segs = ev.segs ?? []
+      const text = segs.map((s: any) => s.utf8 ?? "").join("").trim()
+      if (!text || text === "\n") continue
+      segments.push({
+        startMs: ev.tStartMs ?? 0,
+        durationMs: ev.dDurationMs ?? 0,
+        text
+      })
+      texts.push(text)
+    }
+    console.log("[transcript] segments count:", segments.length)
+
+    if (!segments.length) return null
+
+    return {
+      videoId,
+      title: player?.videoDetails?.title ?? "",
+      channel: player?.videoDetails?.author ?? "",
+      durationMs: player?.videoDetails?.lengthSeconds
+        ? Number(player.videoDetails.lengthSeconds) * 1000
+        : 0,
+      languageCode: track.languageCode,
+      segments,
+      plainText: texts.join(" ")
+    }
+  } catch (e) {
+    console.log("[transcript] outer err:", (e as Error).message)
     return null
-  }
-  console.log("[transcript] server status:", serverRes.status)
-  if (!serverRes.ok) {
-    const t = await serverRes.text().catch(() => "")
-    console.warn("[transcript] server non-OK body head:", t.slice(0, 200))
-    return null
-  }
-  const serverJson: any = await serverRes.json().catch(() => null)
-  console.log("[transcript] server response keys:", serverJson ? Object.keys(serverJson).slice(0, 5) : "null")
-  if (!serverJson?.segments?.length) {
-    console.warn("[transcript] server returned no segments, error:", serverJson?.error)
-    return null
-  }
-  // Server data path：直接返回（不用走 client-side 解析）
-  console.log("[transcript] using server-side data, segments:", serverJson.segments.length)
-  return {
-    videoId,
-    title: serverJson.title ?? "",
-    channel: serverJson.channel ?? "",
-    durationMs: 0,
-    languageCode: serverJson.languageCode ?? "en",
-    segments: serverJson.segments,
-    plainText: (serverJson.segments ?? []).map((s: any) => s.text ?? "").join(" ")
   }
 }
 
