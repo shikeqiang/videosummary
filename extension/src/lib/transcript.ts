@@ -176,10 +176,12 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
         `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
         { credentials: "include" }
       )
+      console.log("[transcript] HTML fetch status:", watchRes.status, "ct:", watchRes.headers.get("content-type")?.slice(0, 40))
       if (watchRes.ok) {
         const html = await watchRes.text()
+        console.log("[transcript] HTML body len:", html.length, "has marker:", html.includes("ytInitialPlayerResponse"))
         player = extractPlayerFromHTML(html)
-        if (player) console.log("[transcript] got player from HTML")
+        if (player) console.log("[transcript] got player from HTML, keys:", Object.keys(player).slice(0, 5))
       }
     } catch (e) {
       console.log("[transcript] HTML fetch err:", (e as Error).message)
