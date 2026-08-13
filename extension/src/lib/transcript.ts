@@ -17,6 +17,8 @@ export interface TranscriptSegment {
   text: string
 }
 
+const WEB_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+
 export interface TranscriptResult {
   videoId: string
   title: string
@@ -204,8 +206,44 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   }
 
   if (!player) {
+    source = "innertube"
+    console.log("[transcript] window player empty, trying InnerTube API")
+    try {
+      const r = await fetch(
+        `https://www.youtube.com/youtubei/v1/player?key=${WEB_INNERTUBE_KEY}&prettyPrint=false`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Referer": `https://www.youtube.com/watch?v=${videoId}`,
+            "Origin": "https://www.youtube.com",
+          },
+          credentials: "include",
+          body: JSON.stringify({
+            videoId,
+            context: { client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "7.20250101.00.00" } }
+          })
+        }
+      )
+      console.log("[transcript] InnerTube status:", r.status)
+      if (r.ok) {
+        const p = await r.json()
+        if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+          player = p as YtPlayerResponse
+          console.log("[transcript] got player from InnerTube, keys:", Object.keys(player).slice(0, 7))
+        } else {
+          console.log("[transcript] InnerTube no captions. keys:", Object.keys(p).slice(0, 7))
+        }
+      }
+    } catch (e) {
+      console.log("[transcript] InnerTube err:", (e as Error).message?.slice(0, 200))
+    }
+  }
+
+  if (!player) {
     source = "html-fetch"
-    console.log("[transcript] window player empty, fetching HTML")
+    console.log("[transcript] no player yet, fetching HTML")
     try {
       const watchRes = await fetch(
         `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
