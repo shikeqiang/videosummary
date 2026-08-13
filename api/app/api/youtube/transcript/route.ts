@@ -5,50 +5,35 @@ export const dynamic = "force-dynamic"
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36"
-const WEB_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
-function pickBestTrack(tracks: any[]): any | null {
-  if (!tracks?.length) return null
-  return (
-    tracks.find((t: any) => t.kind !== "asr") ??
-    tracks.find((t: any) => t.languageCode === "en" || t.languageCode?.startsWith("en.")) ??
-    tracks[0]
-  )
-}
-
-/**
- * 用 InnerTube API 拿 player response（不依赖 pot token）
- * InnerTube 接受公开 key，返回 fresh player response with caption tracks
- */
-async function fetchPlayerViaInnerTube(videoId: string): Promise<any | null> {
-  const url = `https://www.youtube.com/youtubei/v1/player?key=${WEB_INNERTUBE_KEY}&prettyPrint=false`
-  try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        "User-Agent": UA,
-        "Content-Type": "application/json",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://www.youtube.com",
-        "Referer": `https://www.youtube.com/watch?v=${videoId}`,
-      },
-      body: JSON.stringify({
-        videoId,
-        context: {
-          client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "7.20250101.00.00" }
-        }
-      }),
-      cache: "no-store",
-    })
-    if (!res.ok) {
-      console.log("[transcript-api] InnerTube status:", res.status)
-      return null
+function extractPlayerResponse(html: string): any | null {
+  const marker = "ytInitialPlayerResponse = "
+  const i = html.indexOf(marker)
+  if (i < 0) return null
+  let j = i + marker.length
+  while (j < html.length && html[j] !== "{") j++
+  if (j >= html.length) return null
+  let depth = 0, inString = false, escapeNext = false
+  for (let k = j; k < html.length; k++) {
+    const c = html[k]
+    if (escapeNext) { escapeNext = false; continue }
+    if (c === "\\" && inString) { escapeNext = true; continue }
+    if (c === '"' && !escapeNext) { inString = !inString; continue }
+    if (inString) continue
+    if (c === "{") depth++
+    else if (c === "}") {
+      depth--
+      if (depth === 0) {
+        const obj = html.substring(j, k + 1)
+        try {
+          const result = new Function(`return (${obj});`)()
+          if (typeof result !== "object" || result === null) return null
+          return result
+        } catch (e: any) { return null }
+      }
     }
-    return await res.json()
-  } catch (e: any) {
-    console.log("[transcript-api] InnerTube err:", e?.message)
-    return null
   }
+  return null
 }
 
 export async function GET(req: NextRequest) {
@@ -56,32 +41,46 @@ export async function GET(req: NextRequest) {
   if (!videoId) return NextResponse.json({ error: "missing videoId" }, { status: 400 })
 
   try {
-    // 用 InnerTube API 拿 player response（pot-free）
-    console.log("[transcript-api] calling InnerTube for", videoId)
-    const player = await fetchPlayerViaInnerTube(videoId)
-    if (!player) {
-      return NextResponse.json({ error: "InnerTube failed" }, { status: 502 })
-    }
-    console.log("[transcript-api] InnerTube keys:", Object.keys(player).slice(0, 5))
+    // 1) 拉 watch page HTML（拿全量 player response）
+    const watchRes = await fetch(
+      `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
+      { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" }, cache: "no-store" }
+    )
+    if (!watchRes.ok) return NextResponse.json({ error: "watch fetch failed", status: watchRes.status }, { status: 502 })
+    const html = await watchRes.text()
+    console.log("[transcript-api] html len:", html.length)
+    const player = extractPlayerResponse(html)
+    if (!player) return NextResponse.json({ error: "no player response" }, { status: 502 })
 
+    // 2) 拿 caption tracks
     const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
     if (!tracks?.length) return NextResponse.json({ error: "no captions" }, { status: 404 })
-    const track = pickBestTrack(tracks)
-    if (!track?.baseUrl) return NextResponse.json({ error: "no track baseUrl" }, { status: 502 })
+    console.log("[transcript-api] tracks count:", tracks.length)
 
-    console.log("[transcript-api] track:", JSON.stringify(track).slice(0, 500))
+    // 3) 选最佳 + 用 timedtext URL
+    const track =
+      tracks.find((t: any) => t.kind !== "asr") ??
+      tracks.find((t: any) => t.languageCode === "en" || t.languageCode?.startsWith("en.")) ??
+      tracks[0]
 
-    // 拿 caption track — InnerTube 返的 baseUrl 应该是 pot-free 的
+    console.log("[transcript-api] track.baseUrl:", track.baseUrl?.slice(0, 100))
     const sep = track.baseUrl.includes("?") ? "&" : "?"
     const capUrl = `${track.baseUrl}${sep}fmt=json3`
-    console.log("[transcript-api] capUrl FULL:", capUrl)
+    console.log("[transcript-api] capUrl len:", capUrl.length)
 
+    // 4) fetch 时加足 headers（YouTube 拒 server 请求经常因为缺 Referer/Origin）
     const capRes = await fetch(capUrl, {
       headers: {
         "User-Agent": UA,
         "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "application/json, text/plain, */*",
         "Referer": `https://www.youtube.com/watch?v=${videoId}`,
         "Origin": "https://www.youtube.com",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "X-Youtube-Client-Name": "1",  // 模拟 WEB client
+        "X-Youtube-Client-Version": "2.20240101.00.00",
       },
       cache: "no-store",
     })
