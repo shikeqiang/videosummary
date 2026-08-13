@@ -5,9 +5,10 @@
  *   1. window.ytplayer.player.getPlayerResponse() - 最可靠
  *   2. window.ytplayer.config.args.raw_player_response
  *   3. window.ytInitialPlayerResponse (老 YouTube)
- *   4. fetch watch page HTML 然后 extractPlayerResponse - 兜底
+ *   4. fetch watch page HTML 然后 extractPlayerFromHTML - 兜底
  *
- * timedtext 端点单独用 fetch（带 cookies，浏览器自动带 pot）
+ * 不用 eval/new Function（YouTube CSP 禁 unsafe-eval）
+ * 用 string-aware quoteUnquotedKeys 转 JS object literal 成合法 JSON
  */
 
 export interface TranscriptSegment {
@@ -46,27 +47,20 @@ type YtPlayerResponse = {
   }
 }
 
-/**
- * 1-3：从浏览器已有的 player 对象拿
- * 返回 null 表示没拿到
- */
 function getPlayerFromWindow(): YtPlayerResponse | null {
   const w = window as any
-  // 1) ytplayer.player.getPlayerResponse()
   try {
     const p = w.ytplayer?.player?.getPlayerResponse?.()
     if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
       return p as YtPlayerResponse
     }
   } catch {}
-  // 2) ytplayer.config.args.raw_player_response
   try {
     const p = w.ytplayer?.config?.args?.raw_player_response
     if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
       return p as YtPlayerResponse
     }
   } catch {}
-  // 3) ytInitialPlayerResponse (老 YouTube)
   try {
     const p = w.ytInitialPlayerResponse
     if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
@@ -74,30 +68,6 @@ function getPlayerFromWindow(): YtPlayerResponse | null {
     }
   } catch {}
   return null
-}
-
-/**
- * 等 ytplayer 准备好（YouTube SPA 加载是异步的）
- * 轮询 30 次，每次 200ms，最多 6s
- */
-function waitForPlayer(): Promise<any> {
-  return new Promise((resolve) => {
-    let attempts = 0
-    const max = 30
-    const tick = () => {
-      const w = window as any
-      if (w.ytplayer?.player?.getPlayerResponse?.()) {
-        resolve(w.ytplayer)
-        return
-      }
-      if (++attempts >= max) {
-        resolve(null)
-        return
-      }
-      setTimeout(tick, 200)
-    }
-    tick()
-  })
 }
 
 function pickBestTrack(tracks: YtCaptionTrack[]): YtCaptionTrack | null {
@@ -128,6 +98,47 @@ function findMatchingBrace(s: string, start: number): number {
   return -1
 }
 
+/**
+ * string-aware 把 JS object literal 中 unquoted keys 加上引号
+ * 不用 eval，符合 YouTube CSP（禁 unsafe-eval）
+ */
+function quoteUnquotedKeys(s: string): string {
+  const out: string[] = []
+  let i = 0
+  let inString = false
+  let escapeNext = false
+  const n = s.length
+  while (i < n) {
+    const c = s[i]
+    if (escapeNext) { out.push(c); escapeNext = false; i++; continue }
+    if (c === "\\" && inString) { out.push(c); escapeNext = true; i++; continue }
+    if (c === '"' && !escapeNext) { inString = !inString; out.push(c); i++; continue }
+    if (inString) { out.push(c); i++; continue }
+    if ((c === "{" || c === ",") && i + 1 < n) {
+      let k = i + 1
+      while (k < n && (s[k] === " " || s[k] === "\n" || s[k] === "\t" || s[k] === "\r")) k++
+      if (k < n && /[a-zA-Z_$]/.test(s[k])) {
+        let e = k
+        while (e < n && /[a-zA-Z0-9_$]/.test(s[e])) e++
+        let m = e
+        while (m < n && (s[m] === " " || s[m] === "\n" || s[m] === "\t" || s[m] === "\r")) m++
+        if (m < n && s[m] === ":") {
+          out.push(c)
+          for (let x = i + 1; x < k; x++) out.push(s[x])
+          out.push('"')
+          for (let x = k; x < e; x++) out.push(s[x])
+          out.push('"')
+          i = e
+          continue
+        }
+      }
+    }
+    out.push(c)
+    i++
+  }
+  return out.join("")
+}
+
 function extractPlayerFromHTML(html: string): YtPlayerResponse | null {
   const marker = "ytInitialPlayerResponse = "
   const i = html.indexOf(marker)
@@ -145,38 +156,53 @@ function extractPlayerFromHTML(html: string): YtPlayerResponse | null {
   }
   const obj = html.substring(j, end + 1)
   console.log("[transcript] HTML parse: obj len:", obj.length)
+  const json = quoteUnquotedKeys(obj)
   try {
-    const result = new Function(`return (${obj});`)()
-    console.log("[transcript] HTML parse: new Function OK, type:", typeof result, "has captions:", !!result?.captions)
+    const result = JSON.parse(json)
+    console.log("[transcript] HTML parse: JSON.parse OK, has captions:", !!result?.captions)
     if (typeof result !== "object" || result === null) return null
     return result as YtPlayerResponse
   } catch (e) {
-    console.log("[transcript] HTML parse: new Function err:", (e as Error).message?.slice(0, 200))
+    console.log("[transcript] HTML parse: JSON.parse err:", (e as Error).message?.slice(0, 200))
     return null
   }
 }
 
-function findTitleChannel(player: YtPlayerResponse | null, videoId: string) {
-  return {
-    title: player?.videoDetails?.title ?? document.title?.replace(" - YouTube", "") ?? "",
-    channel: player?.videoDetails?.author ?? ""
-  }
+async function waitForPlayer(): Promise<any> {
+  return new Promise((resolve) => {
+    let attempts = 0
+    const tick = () => {
+      const w = window as any
+      if (w.ytplayer?.player?.getPlayerResponse?.()) {
+        resolve(w.ytplayer)
+        return
+      }
+      if (++attempts >= 30) { resolve(null); return }
+      setTimeout(tick, 200)
+    }
+    tick()
+  })
 }
 
 export async function fetchTranscript(videoId: string): Promise<TranscriptResult | null> {
   console.log("[transcript] fetchTranscript CALLED with videoId:", videoId)
   if (!videoId) return null
 
-  // 数据源 1-3：浏览器已有 player 对象（先等 SPA 加载完）
-  console.log("[transcript] waiting for ytplayer (up to 6s)...")
-  const ytplayer = await waitForPlayer()
-  let player = ytplayer?.player?.getPlayerResponse?.() ?? null
+  let player = getPlayerFromWindow()
   let source = "player-object"
-  if (player) {
-    console.log("[transcript] got player from window (sources 1-3)")
+  if (player) console.log("[transcript] got player from window (sources 1-3)")
+
+  if (!player) {
+    console.log("[transcript] waiting for ytplayer (up to 6s)...")
+    const ytplayer = await waitForPlayer()
+    if (ytplayer) {
+      try {
+        player = ytplayer?.player?.getPlayerResponse?.() ?? null
+        if (player) console.log("[transcript] got player after wait")
+      } catch {}
+    }
   }
 
-  // 数据源 4：fetch watch page HTML 兜底
   if (!player) {
     source = "html-fetch"
     console.log("[transcript] window player empty, fetching HTML")
@@ -202,20 +228,15 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
     return null
   }
 
-  // 拿 caption tracks
   const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
   if (!tracks?.length) {
     console.log("[transcript] no caption tracks in player response")
     return null
   }
   const track = pickBestTrack(tracks)
-  if (!track?.baseUrl) {
-    console.log("[transcript] no track baseUrl")
-    return null
-  }
+  if (!track?.baseUrl) return null
   console.log("[transcript] track:", track.languageCode, track.kind ?? "?", "from:", source)
 
-  // fetch timedtext（带 cookies 浏览器自动带 pot）
   const sep = track.baseUrl.includes("?") ? "&" : "?"
   const capUrl = `${track.baseUrl}${sep}fmt=json3`
   let capRes: Response
@@ -255,14 +276,12 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
     texts.push(text)
   }
   console.log("[transcript] segments count:", segments.length)
-
   if (!segments.length) return null
 
-  const { title, channel } = findTitleChannel(player, videoId)
   return {
     videoId,
-    title,
-    channel,
+    title: player?.videoDetails?.title ?? "",
+    channel: player?.videoDetails?.author ?? "",
     durationMs: player?.videoDetails?.lengthSeconds
       ? Number(player.videoDetails.lengthSeconds) * 1000
       : 0,
