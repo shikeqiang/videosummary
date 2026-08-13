@@ -15,33 +15,14 @@ function pickBestTrack(tracks: any[]): any | null {
   )
 }
 
-/**
- * 把 YouTube 的 JS object literal（unquoted keys）转成合法 JSON
- * - `{key: "value"}` → `{"key": "value"}`
- * - 已经在引号里的 key 不动
- * - 字符串值里不能有 unquoted 字符（实际场景里 YouTube 字符串都 quoted，安全）
- */
-function fixUnquotedKeys(s: string): string {
-  // 关键替换：匹配 [{,] 后到 : 前的标识符，加双引号
-  return s.replace(/([{,]\s*)([a-zA-Z_$][a-zA-Z0-9_$]*)(\s*):/g, '$1"$2"$3:')
-}
-
 function extractPlayerResponse(html: string): any | null {
   const marker = "ytInitialPlayerResponse = "
   const i = html.indexOf(marker)
-  if (i < 0) {
-    console.log("[transcript-api] no marker")
-    return null
-  }
-
+  if (i < 0) return null
   let j = i + marker.length
   while (j < html.length && html[j] !== "{") j++
   if (j >= html.length) return null
-
-  // 字符串感知的括号匹配
-  let depth = 0
-  let inString = false
-  let escapeNext = false
+  let depth = 0, inString = false, escapeNext = false
   for (let k = j; k < html.length; k++) {
     const c = html[k]
     if (escapeNext) { escapeNext = false; continue }
@@ -54,20 +35,13 @@ function extractPlayerResponse(html: string): any | null {
       if (depth === 0) {
         const obj = html.substring(j, k + 1)
         console.log("[transcript-api] obj captured, len:", obj.length)
-        // 用 new Function 跑（obj 边界已经画对了，里面是合法 JS 对象字面量）
         try {
-          // eslint-disable-next-line no-new-func
           const result = new Function(`return (${obj});`)()
-          if (typeof result !== "object" || result === null) {
-            console.error("[transcript-api] new Function returned non-object:", typeof result)
-            return null
-          }
-          console.log("[transcript-api] parsed via new Function, keys:", Object.keys(result).slice(0, 5))
+          if (typeof result !== "object" || result === null) return null
           return result
         } catch (e: any) {
-          console.error("[transcript-api] new Function err:", e?.message?.slice(0, 200))
-          console.error("[transcript-api] obj head:", obj.slice(0, 300))
-          console.error("[transcript-api] obj tail:", obj.slice(-200))
+          console.error("[transcript-api] new Function err:", e?.message)
+          console.error("[transcript-api] obj head:", obj.slice(0, 200))
           return null
         }
       }
@@ -78,9 +52,7 @@ function extractPlayerResponse(html: string): any | null {
 
 export async function GET(req: NextRequest) {
   const videoId = req.nextUrl.searchParams.get("videoId")
-  if (!videoId) {
-    return NextResponse.json({ error: "missing videoId" }, { status: 400 })
-  }
+  if (!videoId) return NextResponse.json({ error: "missing videoId" }, { status: 400 })
 
   try {
     const watchRes = await fetch(
@@ -88,10 +60,7 @@ export async function GET(req: NextRequest) {
       { headers: { "User-Agent": UA }, cache: "no-store" }
     )
     if (!watchRes.ok) {
-      return NextResponse.json(
-        { error: "watch fetch failed", status: watchRes.status },
-        { status: 502 }
-      )
+      return NextResponse.json({ error: "watch fetch failed", status: watchRes.status }, { status: 502 })
     }
     const html = await watchRes.text()
     console.log("[transcript-api] html len:", html.length)
@@ -101,22 +70,39 @@ export async function GET(req: NextRequest) {
     }
 
     const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
-    if (!tracks?.length) {
-      return NextResponse.json({ error: "no captions" }, { status: 404 })
-    }
+    if (!tracks?.length) return NextResponse.json({ error: "no captions" }, { status: 404 })
     const track = pickBestTrack(tracks)
-    if (!track?.baseUrl) {
-      return NextResponse.json({ error: "no track baseUrl" }, { status: 502 })
-    }
+    if (!track?.baseUrl) return NextResponse.json({ error: "no track baseUrl" }, { status: 502 })
 
-    const capRes = await fetch(
-      `${track.baseUrl}&fmt=json3`,
-      { headers: { "User-Agent": UA }, cache: "no-store" }
-    )
+    // 看 track 详情
+    console.log("[transcript-api] track:", JSON.stringify({
+      lang: track.languageCode,
+      name: track.name,
+      kind: track.kind,
+      baseUrl: track.baseUrl?.slice(0, 100)
+    }))
+
+    // fetch timedtext 加 fmt=json3 + 兜底
+    const sep = track.baseUrl.includes("?") ? "&" : "?"
+    const capUrl = `${track.baseUrl}${sep}fmt=json3`
+    console.log("[transcript-api] capUrl:", capUrl.slice(0, 140))
+    const capRes = await fetch(capUrl, { headers: { "User-Agent": UA }, cache: "no-store" })
+    console.log("[transcript-api] capRes status:", capRes.status, "ct:", capRes.headers.get("content-type")?.slice(0, 60))
     if (!capRes.ok) {
+      const t = await capRes.text().catch(() => "")
+      console.error("[transcript-api] cap non-OK body head:", t.slice(0, 200))
       return NextResponse.json({ error: "caption fetch failed", status: capRes.status }, { status: 502 })
     }
-    const capJson = (await capRes.json()) as any
+    const capText = await capRes.text()
+    console.log("[transcript-api] cap body len:", capText.length, "head:", capText.slice(0, 100))
+    let capJson: any
+    try {
+      capJson = JSON.parse(capText)
+    } catch (e: any) {
+      console.error("[transcript-api] cap JSON.parse err:", e?.message)
+      console.error("[transcript-api] cap body tail:", capText.slice(-200))
+      return NextResponse.json({ error: "internal", message: e?.message }, { status: 500 })
+    }
 
     const evList: any[] = capJson?.events ?? []
     const segments: Array<{ startMs: number; durationMs: number; text: string }> = []
@@ -128,6 +114,7 @@ export async function GET(req: NextRequest) {
       segments.push({ startMs: ev.tStartMs ?? 0, durationMs: ev.dDurationMs ?? 0, text })
       texts.push(text)
     }
+    console.log("[transcript-api] segments count:", segments.length)
 
     return NextResponse.json({
       videoId,
@@ -138,7 +125,7 @@ export async function GET(req: NextRequest) {
       plainText: texts.join(" ")
     })
   } catch (e: any) {
-    console.error("[transcript-api] outer error:", e?.message ?? e)
+    console.error("[transcript-api] outer error:", e?.message)
     return NextResponse.json({ error: "internal", message: e?.message }, { status: 500 })
   }
 }
