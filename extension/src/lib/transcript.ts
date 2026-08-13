@@ -131,18 +131,27 @@ function findMatchingBrace(s: string, start: number): number {
 function extractPlayerFromHTML(html: string): YtPlayerResponse | null {
   const marker = "ytInitialPlayerResponse = "
   const i = html.indexOf(marker)
-  if (i < 0) return null
+  if (i < 0) {
+    console.log("[transcript] HTML parse: marker not found")
+    return null
+  }
   let j = i + marker.length
   while (j < html.length && html[j] !== "{") j++
   if (j >= html.length) return null
   const end = findMatchingBrace(html, j)
-  if (end < 0) return null
+  if (end < 0) {
+    console.log("[transcript] HTML parse: no matching brace found")
+    return null
+  }
   const obj = html.substring(j, end + 1)
+  console.log("[transcript] HTML parse: obj len:", obj.length)
   try {
     const result = new Function(`return (${obj});`)()
+    console.log("[transcript] HTML parse: new Function OK, type:", typeof result, "has captions:", !!result?.captions)
     if (typeof result !== "object" || result === null) return null
     return result as YtPlayerResponse
-  } catch {
+  } catch (e) {
+    console.log("[transcript] HTML parse: new Function err:", (e as Error).message?.slice(0, 200))
     return null
   }
 }
