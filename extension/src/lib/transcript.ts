@@ -222,7 +222,7 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
           credentials: "include",
           body: JSON.stringify({
             videoId,
-            context: { client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "7.20250101.00.00" } }
+            context: { client: { clientName: "WEB", clientVersion: "2.20240101.00.00" } }
           })
         }
       )
@@ -233,7 +233,7 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
           player = p as YtPlayerResponse
           console.log("[transcript] got player from InnerTube, keys:", Object.keys(player).slice(0, 7))
         } else {
-          console.log("[transcript] InnerTube no captions. keys:", Object.keys(p).slice(0, 7))
+          console.log("[transcript] InnerTube no captions. full keys:", Object.keys(p), "  has streamingData:", !!p.streamingData, "  has captions field:", !!p.captions)
         }
       }
     } catch (e) {
