@@ -76,6 +76,30 @@ function getPlayerFromWindow(): YtPlayerResponse | null {
   return null
 }
 
+/**
+ * 等 ytplayer 准备好（YouTube SPA 加载是异步的）
+ * 轮询 30 次，每次 200ms，最多 6s
+ */
+function waitForPlayer(): Promise<any> {
+  return new Promise((resolve) => {
+    let attempts = 0
+    const max = 30
+    const tick = () => {
+      const w = window as any
+      if (w.ytplayer?.player?.getPlayerResponse?.()) {
+        resolve(w.ytplayer)
+        return
+      }
+      if (++attempts >= max) {
+        resolve(null)
+        return
+      }
+      setTimeout(tick, 200)
+    }
+    tick()
+  })
+}
+
 function pickBestTrack(tracks: YtCaptionTrack[]): YtCaptionTrack | null {
   if (!tracks?.length) return null
   return (
@@ -134,8 +158,10 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   console.log("[transcript] fetchTranscript CALLED with videoId:", videoId)
   if (!videoId) return null
 
-  // 数据源 1-3：浏览器已有 player 对象
-  let player = getPlayerFromWindow()
+  // 数据源 1-3：浏览器已有 player 对象（先等 SPA 加载完）
+  console.log("[transcript] waiting for ytplayer (up to 6s)...")
+  const ytplayer = await waitForPlayer()
+  let player = ytplayer?.player?.getPlayerResponse?.() ?? null
   let source = "player-object"
   if (player) {
     console.log("[transcript] got player from window (sources 1-3)")
