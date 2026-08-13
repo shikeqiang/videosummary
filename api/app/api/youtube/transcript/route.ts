@@ -27,7 +27,7 @@ function extractPlayerResponse(html: string): any | null {
     const c = html[k]
     if (escapeNext) { escapeNext = false; continue }
     if (c === "\\" && inString) { escapeNext = true; continue }
-    if (c === '"' && !escapeNext) { inString = !inString; continue }
+    if (c === '"' && !escapeWithNext) { inString = !inString; continue }
     if (inString) continue
     if (c === "{") depth++
     else if (c === "}") {
@@ -38,12 +38,8 @@ function extractPlayerResponse(html: string): any | null {
         try {
           const result = new Function(`return (${obj});`)()
           if (typeof result !== "object" || result === null) return null
-          console.log("[transcript-api] parsed via new Function")
           return result
-        } catch (e: any) {
-          console.error("[transcript-api] new Function err:", e?.message)
-          return null
-        }
+        } catch (e: any) { return null }
       }
     }
   }
@@ -57,7 +53,13 @@ export async function GET(req: NextRequest) {
   try {
     const watchRes = await fetch(
       `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
-      { headers: { "User-Agent": UA }, cache: "no-store" }
+      {
+        headers: {
+          "User-Agent": UA,
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        cache: "no-store",
+      }
     )
     if (!watchRes.ok) return NextResponse.json({ error: "watch fetch failed", status: watchRes.status }, { status: 502 })
     const html = await watchRes.text()
@@ -70,14 +72,23 @@ export async function GET(req: NextRequest) {
     const track = pickBestTrack(tracks)
     if (!track?.baseUrl) return NextResponse.json({ error: "no track baseUrl" }, { status: 502 })
 
-    // 关键 log：序列化整个 track 让我们看到 baseUrl 等所有字段
-    console.log("[transcript-api] track dump:", JSON.stringify(track).slice(0, 800))
+    // log 完整 baseUrl（之前的 log 被 slice 截断）
+    console.log("[transcript-api] track.baseUrl FULL:", track.baseUrl)
 
     const sep = track.baseUrl.includes("?") ? "&" : "?"
     const capUrl = `${track.baseUrl}${sep}fmt=json3`
-    console.log("[transcript-api] capUrl full:", capUrl)
+    console.log("[transcript-api] capUrl FULL:", capUrl)
+    console.log("[transcript-api] capUrl len:", capUrl.length)
 
-    const capRes = await fetch(capUrl, { headers: { "User-Agent": UA }, cache: "no-store" })
+    const capRes = await fetch(capUrl, {
+      headers: {
+        "User-Agent": UA,
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": `https://www.youtube.com/watch?v=${videoId}`,
+        "Origin": "https://www.youtube.com",
+      },
+      cache: "no-store",
+    })
     console.log("[transcript-api] capRes status:", capRes.status, "ct:", capRes.headers.get("content-type")?.slice(0, 60))
     if (!capRes.ok) {
       const t = await capRes.text().catch(() => "")
