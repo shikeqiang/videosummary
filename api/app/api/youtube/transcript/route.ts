@@ -35,7 +35,7 @@ async function fetchPlayerViaInnerTube(videoId: string): Promise<any | null> {
       body: JSON.stringify({
         videoId,
         context: {
-          client: { clientName: "WEB", clientVersion: "2.20240101.00.00" }
+          client: { clientName: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", clientVersion: "7.20250101.00.00" }
         }
       }),
       cache: "no-store",
