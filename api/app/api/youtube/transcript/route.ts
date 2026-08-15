@@ -22,10 +22,34 @@ const INNER_TUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
  */
 async function getPlayerFromInnerTube(videoId: string): Promise<any | null> {
   const url = `https://www.youtube.com/youtubei/v1/player?key=${INNER_TUBE_KEY}`
+  // 多个 client 备选，按"对无 cookie/无 pot 请求最宽松"排序
+  // params="8AEB" = 请求完整 player response（含 captions）
+  // contentCheckOk/racyCheckOk = ANDROID/WEB client 必须，否则 captions 字段被剥离
   const clients = [
-    { name: "ANDROID", version: "19.09.37", ua: UA_ANDROID },
-    { name: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", version: "2.0", ua: UA_TV },
-    { name: "WEB", version: "2.20240101.00.00", ua: UA },
+    {
+      name: "ANDROID",
+      version: "19.09.37",
+      ua: UA_ANDROID,
+      extra: { androidSdkVersion: 30, timeZone: "UTC", utcOffsetMinutes: 0 }
+    },
+    {
+      name: "TVHTML5_SIMPLY_EMBEDDED_PLAYER",
+      version: "2.0",
+      ua: UA_TV,
+      extra: {}
+    },
+    {
+      name: "MWEB",
+      version: "2.20240101.00.00",
+      ua: UA,
+      extra: {}
+    },
+    {
+      name: "WEB",
+      version: "2.20240101.00.00",
+      ua: UA,
+      extra: {}
+    }
   ]
   for (const c of clients) {
     try {
@@ -39,7 +63,18 @@ async function getPlayerFromInnerTube(videoId: string): Promise<any | null> {
         },
         body: JSON.stringify({
           videoId,
-          context: { client: { clientName: c.name, clientVersion: c.version, hl: "en" } }
+          params: "8AEB",
+          contentCheckOk: true,
+          racyCheckOk: true,
+          context: {
+            client: {
+              clientName: c.name,
+              clientVersion: c.version,
+              hl: "en",
+              ...c.extra
+            },
+            user: { lockedSafetyMode: false }
+          }
         })
       })
       if (!r.ok) {
@@ -52,7 +87,9 @@ async function getPlayerFromInnerTube(videoId: string): Promise<any | null> {
         console.log("[transcript-api] InnerTube", c.name, "got tracks:", tracks.length)
         return p
       }
-      console.log("[transcript-api] InnerTube", c.name, "no captions, plStatus:", p?.playabilityStatus?.status)
+      const plStatus = p?.playabilityStatus?.status
+      const reason = p?.playabilityStatus?.reason
+      console.log("[transcript-api] InnerTube", c.name, "no captions, plStatus:", plStatus, "reason:", reason?.slice(0, 80))
     } catch (e: any) {
       console.log("[transcript-api] InnerTube", c.name, "err:", e?.message?.slice(0, 80))
     }
