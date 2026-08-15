@@ -1,14 +1,12 @@
 /**
- * YouTube transcript 提取（**全在扩展/浏览器上下文**）
+ * YouTube transcript 提取（**content script 全在浏览器上下文跑**）
  *
- * 4 个数据源（任一成功就返回 segments）：
- *   1. window.ytplayer.player.getPlayerResponse() - 最可靠
- *   2. window.ytplayer.config.args.raw_player_response
- *   3. window.ytInitialPlayerResponse (老 YouTube)
- *   4. fetch watch page HTML 然后 extractPlayerFromHTML - 兜底
- *
- * 不用 eval/new Function（YouTube CSP 禁 unsafe-eval）
- * 用 string-aware quoteUnquotedKeys 转 JS object literal 成合法 JSON
+ * 5 步 fallback：
+ *  1. 页面 script 提 playerResponse (ytInitialPlayerResponse)
+ *  2. 直接 fetch track.baseUrl 拿 XML/srv3（带 cookies + 自动 pot）
+ *  3. parseCaptionXml 支持两种格式
+ *  4. 全失败 → fetch("/api/transcript?...") 代理 fallback
+ *  5. 解析 proxy 返回的 trackUrl
  */
 
 export interface TranscriptSegment {
@@ -16,8 +14,6 @@ export interface TranscriptSegment {
   durationMs: number
   text: string
 }
-
-const WEB_INNERTUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
 export interface TranscriptResult {
   videoId: string
@@ -42,27 +38,13 @@ type YtPlayerResponse = {
       captionTracks?: YtCaptionTrack[]
     }
   }
-  videoDetails?: {
-    title?: string
-    author?: string
-    lengthSeconds?: string | number
-  }
+  videoDetails?: { title?: string; author?: string; lengthSeconds?: string | number }
 }
 
-function getPlayerFromWindow(): YtPlayerResponse | null {
+const API_BASE = (typeof process !== "undefined" && (process as any).env?.PLASMO_PUBLIC_API_BASE_URL) || "http://localhost:3000"
+
+function getPlayerFromScript(): YtPlayerResponse | null {
   const w = window as any
-  try {
-    const p = w.ytplayer?.player?.getPlayerResponse?.()
-    if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-      return p as YtPlayerResponse
-    }
-  } catch {}
-  try {
-    const p = w.ytplayer?.config?.args?.raw_player_response
-    if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-      return p as YtPlayerResponse
-    }
-  } catch {}
   try {
     const p = w.ytInitialPlayerResponse
     if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
@@ -72,102 +54,127 @@ function getPlayerFromWindow(): YtPlayerResponse | null {
   return null
 }
 
-function pickBestTrack(tracks: YtCaptionTrack[]): YtCaptionTrack | null {
-  if (!tracks?.length) return null
-  return (
-    tracks.find((t) => t.kind !== "asr") ??
-    tracks.find((t) => t.languageCode === "en" || t.languageCode?.startsWith("en.")) ??
-    tracks[0]
-  )
+function getPlayerFromWindowObject(): YtPlayerResponse | null {
+  const w = window as any
+  try {
+    const p = w.ytplayer?.player?.getPlayerResponse?.()
+    if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+      return p as YtPlayerResponse
+    }
+  } catch {}
+  return null
 }
 
-function findMatchingBrace(s: string, start: number): number {
-  let depth = 0
-  let inString = false
-  let escapeNext = false
-  for (let k = start; k < s.length; k++) {
-    const c = s[k]
-    if (escapeNext) { escapeNext = false; continue }
-    if (c === "\\" && inString) { escapeNext = true; continue }
-    if (c === '"' && !escapeNext) { inString = !inString; continue }
-    if (inString) continue
-    if (c === "{") depth++
-    else if (c === "}") {
-      depth--
-      if (depth === 0) return k
-    }
+function getPlayerFromHTML(videoId: string): Promise<YtPlayerResponse | null> {
+  return (async () => {
+    try {
+      const r = await fetch(
+        `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
+        { credentials: "include" }
+      )
+      if (!r.ok) return null
+      const html = await r.text()
+      const marker = "ytInitialPlayerResponse = "
+      const i = html.indexOf(marker)
+      if (i < 0) return null
+      let j = i + marker.length
+      while (j < html.length && html[j] !== "{") j++
+      if (j >= html.length) return null
+      let depth = 0, inString = false, escapeNext = false
+      let end = -1
+      for (let k = j; k < html.length; k++) {
+        const c = html[k]
+        if (escapeNext) { escapeNext = false; continue }
+        if (c === "\\" && inString) { escapeNext = true; continue }
+        if (c === '"' && !escapeNext) { inString = !inString; continue }
+        if (inString) continue
+        if (c === "{") depth++
+        else if (c === "}") { depth--; if (depth === 0) { end = k; break } }
+      }
+      if (end < 0) return null
+      const obj = html.substring(j, end + 1)
+      const out: string[] = []
+      let p = 0, s2 = false, en2 = false
+      const n = obj.length
+      while (p < n) {
+        const c = obj[p]
+        if (en2) { out.push(c); en2 = false; p++; continue }
+        if (c === "\\" && s2) { out.push(c); en2 = true; p++; continue }
+        if (c === '"' && !en2) { s2 = !s2; out.push(c); p++; continue }
+        if (s2) { out.push(c); p++; continue }
+        if ((c === "{" || c === ",") && p + 1 < n) {
+          let k = p + 1
+          while (k < n && (obj[k] === " " || obj[k] === "\n" || obj[k] === "\t" || obj[k] === "\r")) k++
+          if (k < n && /[a-zA-Z_$]/.test(obj[k])) {
+            let e = k
+            while (e < n && /[a-zA-Z0-9_$]/.test(obj[e])) e++
+            let m = e
+            while (m < n && (obj[m] === " " || obj[m] === "\n" || obj[m] === "\t" || obj[m] === "\r")) m++
+            if (m < n && obj[m] === ":") {
+              out.push(c)
+              for (let x = p + 1; x < k; x++) out.push(obj[x])
+              out.push('"')
+              for (let x = k; x < e; x++) out.push(obj[x])
+              out.push('"')
+              p = e
+              continue
+            }
+          }
+        }
+        out.push(c)
+        p++
+      }
+      return JSON.parse(out.join("")) as YtPlayerResponse
+    } catch { return null }
+  })()
+}
+
+function pickBestTrack(tracks: YtCaptionTrack[]): YtCaptionTrack | null {
+  if (!tracks?.length) return null
+  const pref = ["zh-Hans", "zh-CN", "zh", "en", "en-US"]
+  for (const lang of pref) {
+    const t = tracks.find((t) => t.languageCode === lang)
+    if (t) return t
   }
-  return -1
+  return tracks[0]
 }
 
 /**
- * string-aware 把 JS object literal 中 unquoted keys 加上引号
- * 不用 eval，符合 YouTube CSP（禁 unsafe-eval）
+ * 解析 caption 文本
+ * - 新版 (srv3): <p t="毫秒" d="毫秒"><s>词</s></p>
+ * - 经典: <text start="秒" dur="秒">内容</text>
  */
-function quoteUnquotedKeys(s: string): string {
-  const out: string[] = []
-  let i = 0
-  let inString = false
-  let escapeNext = false
-  const n = s.length
-  while (i < n) {
-    const c = s[i]
-    if (escapeNext) { out.push(c); escapeNext = false; i++; continue }
-    if (c === "\\" && inString) { out.push(c); escapeNext = true; i++; continue }
-    if (c === '"' && !escapeNext) { inString = !inString; out.push(c); i++; continue }
-    if (inString) { out.push(c); i++; continue }
-    if ((c === "{" || c === ",") && i + 1 < n) {
-      let k = i + 1
-      while (k < n && (s[k] === " " || s[k] === "\n" || s[k] === "\t" || s[k] === "\r")) k++
-      if (k < n && /[a-zA-Z_$]/.test(s[k])) {
-        let e = k
-        while (e < n && /[a-zA-Z0-9_$]/.test(s[e])) e++
-        let m = e
-        while (m < n && (s[m] === " " || s[m] === "\n" || s[m] === "\t" || s[m] === "\r")) m++
-        if (m < n && s[m] === ":") {
-          out.push(c)
-          for (let x = i + 1; x < k; x++) out.push(s[x])
-          out.push('"')
-          for (let x = k; x < e; x++) out.push(s[x])
-          out.push('"')
-          i = e
-          continue
-        }
-      }
-    }
-    out.push(c)
-    i++
+function parseCaptionXml(xml: string): { startMs: number; durationMs: number; text: string }[] {
+  const out: { startMs: number; durationMs: number; text: string }[] = []
+  // 解析所有 <text> 标签（经典格式）
+  const textRe = /<text\s+([^>]+?)>([\s\S]*?)<\/text>/g
+  let m: RegExpExecArray | null
+  while ((m = textRe.exec(xml)) !== null) {
+    const attrs = m[1]
+    const inner = m[2]
+    const startMatch = attrs.match(/start=["']?(\d+(?:\.\d+)?)["']?/)
+    const durMatch = attrs.match(/dur=["']?(\d+(?:\.\d+)?)["']?/)
+    if (!startMatch) continue
+    const start = parseFloat(startMatch[1])
+    const dur = durMatch ? parseFloat(durMatch[1]) : 0
+    const text = inner.replace(/<[^>]+>/g, "").trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    if (text) out.push({ startMs: Math.round(start * 1000), durationMs: Math.round(dur * 1000), text })
   }
-  return out.join("")
-}
-
-function extractPlayerFromHTML(html: string): YtPlayerResponse | null {
-  const marker = "ytInitialPlayerResponse = "
-  const i = html.indexOf(marker)
-  if (i < 0) {
-    console.log("[transcript] HTML parse: marker not found")
-    return null
+  if (out.length) return out
+  // 解析 <p> 标签（srv3 格式）：从 <p t="毫秒" d="毫秒"> 拿时间戳
+  const pRe = /<p\s+([^>]+?)>([\s\S]*?)<\/p>/g
+  while ((m = pRe.exec(xml)) !== null) {
+    const attrs = m[1]
+    const inner = m[2]
+    const tMatch = attrs.match(/t=["']?(\d+)["']?/)
+    const dMatch = attrs.match(/d=["']?(\d+)["']?/)
+    if (!tMatch) continue
+    const startMs = parseInt(tMatch[1], 10)
+    const dur = dMatch ? parseInt(dMatch[1], 10) : 0
+    const text = inner.replace(/<[^>]+>/g, "").trim().replace(/&amp;/g, "&").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&#39;/g, "'").replace(/&quot;/g, '"')
+    if (text) out.push({ startMs, durationMs: dur, text })
   }
-  let j = i + marker.length
-  while (j < html.length && html[j] !== "{") j++
-  if (j >= html.length) return null
-  const end = findMatchingBrace(html, j)
-  if (end < 0) {
-    console.log("[transcript] HTML parse: no matching brace found")
-    return null
-  }
-  const obj = html.substring(j, end + 1)
-  console.log("[transcript] HTML parse: obj len:", obj.length)
-  const json = quoteUnquotedKeys(obj)
-  try {
-    const result = JSON.parse(json)
-    console.log("[transcript] HTML parse: JSON.parse OK, has captions:", !!result?.captions)
-    if (typeof result !== "object" || result === null) return null
-    return result as YtPlayerResponse
-  } catch (e) {
-    console.log("[transcript] HTML parse: JSON.parse err:", (e as Error).message?.slice(0, 200))
-    return null
-  }
+  return out
 }
 
 async function waitForPlayer(): Promise<any> {
@@ -190,161 +197,140 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   console.log("[transcript] fetchTranscript CALLED with videoId:", videoId)
   if (!videoId) return null
 
-  let player = getPlayerFromWindow()
-  let source = "player-object"
-  if (player) console.log("[transcript] got player from window (sources 1-3)")
+  // 1-2. 拿 player response（多个数据源）
+  let player = getPlayerFromWindowObject() || getPlayerFromScript()
+  let source = player ? "window" : "html"
 
   if (!player) {
     console.log("[transcript] waiting for ytplayer (up to 6s)...")
-    const ytplayer = await waitForPlayer()
-    if (ytplayer) {
-      try {
-        player = ytplayer?.player?.getPlayerResponse?.() ?? null
-        if (player) console.log("[transcript] got player after wait")
-      } catch {}
-    }
+    await waitForPlayer()
+    player = getPlayerFromWindowObject() || getPlayerFromScript()
+  }
+  if (!player) {
+    source = "html"
+    console.log("[transcript] trying HTML fetch")
+    player = await getPlayerFromHTML(videoId)
   }
 
   if (!player) {
-    source = "innertube"
-    console.log("[transcript] window player empty, trying InnerTube API")
-    try {
-      const r = await fetch(
-        `https://www.youtube.com/youtubei/v1/player?key=${WEB_INNERTUBE_KEY}&prettyPrint=false`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": `https://www.youtube.com/watch?v=${videoId}`,
-            "Origin": "https://www.youtube.com",
-          },
-          credentials: "include",
-          body: JSON.stringify({
-            videoId,
-            context: { client: { clientName: "WEB", clientVersion: "2.20240101.00.00" } }
-          })
-        }
-      )
-      console.log("[transcript] InnerTube status:", r.status)
-      if (r.ok) {
-        const p = await r.json()
-        if (p?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
-          player = p as YtPlayerResponse
-          console.log("[transcript] got player from InnerTube, keys:", Object.keys(player).slice(0, 7))
-        } else {
-          console.log("[transcript] InnerTube no captions. full keys:", Object.keys(p), "  has streamingData:", !!p.streamingData, "  has captions field:", !!p.captions)
-        }
-      }
-    } catch (e) {
-      console.log("[transcript] InnerTube err:", (e as Error).message?.slice(0, 200))
-    }
-  }
-
-  if (!player) {
-    source = "html-fetch"
-    console.log("[transcript] no player yet, fetching HTML")
-    try {
-      const watchRes = await fetch(
-        `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
-        { credentials: "include" }
-      )
-      console.log("[transcript] HTML fetch status:", watchRes.status, "ct:", watchRes.headers.get("content-type")?.slice(0, 40))
-      if (watchRes.ok) {
-        const html = await watchRes.text()
-        console.log("[transcript] HTML body len:", html.length, "has marker:", html.includes("ytInitialPlayerResponse"))
-        player = extractPlayerFromHTML(html)
-        if (player) console.log("[transcript] got player from HTML, keys:", Object.keys(player).slice(0, 5))
-      }
-    } catch (e) {
-      console.log("[transcript] HTML fetch err:", (e as Error).message)
-    }
-  }
-
-  if (!player) {
-    console.log("[transcript] all sources failed, returning null")
-    return null
+    console.log("[transcript] all player sources failed, trying API proxy")
+    return await fetchTranscriptViaAPI(videoId)
   }
 
   const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
   if (!tracks?.length) {
-    console.log("[transcript] no caption tracks in player response")
-    return null
+    console.log("[transcript] no caption tracks, trying API proxy")
+    return await fetchTranscriptViaAPI(videoId)
   }
   const track = pickBestTrack(tracks)
-  if (!track?.baseUrl) return null
+  if (!track?.baseUrl) {
+    console.log("[transcript] no track baseUrl, trying API proxy")
+    return await fetchTranscriptViaAPI(videoId)
+  }
   console.log("[transcript] track:", track.languageCode, track.kind ?? "?", "from:", source)
 
+  // 3. 直接 fetch timedtext URL（带 cookies 浏览器自动带 pot）
   const sep = track.baseUrl.includes("?") ? "&" : "?"
   const capUrl = `${track.baseUrl}${sep}fmt=json3`
   let capRes: Response
   try {
     capRes = await fetch(capUrl, { credentials: "include" })
   } catch (e) {
-    console.log("[transcript] cap fetch err:", (e as Error).message)
-    return null
+    console.log("[transcript] direct fetch err:", (e as Error).message?.slice(0, 100))
+    return await fetchTranscriptViaAPI(videoId)
   }
-  console.log("[transcript] capRes status:", capRes.status, "ct:", capRes.headers.get("content-type")?.slice(0, 60))
-  if (!capRes.ok) return null
+  console.log("[transcript] direct capRes status:", capRes.status, "ct:", capRes.headers.get("content-type")?.slice(0, 40))
+  if (!capRes.ok) return await fetchTranscriptViaAPI(videoId)
+
   const capText = await capRes.text()
-  if (!capText || !capText.trimStart().startsWith("{")) {
-    console.log("[transcript] cap body not JSON, len:", capText.length)
-    return null
+  // 4. 优先解析 JSON3（fmt=json3），fallback XML
+  if (capText.trimStart().startsWith("{")) {
+    try {
+      const j = JSON.parse(capText)
+      const evList: any[] = j?.events ?? []
+      const segs: TranscriptSegment[] = []
+      const texts: string[] = []
+      for (const ev of evList) {
+        const inner = (ev.segs ?? []).map((s: any) => s.utf8 ?? "").join("").trim()
+        if (!inner || inner === "\n") continue
+        segs.push({ startMs: ev.tStartMs ?? 0, durationMs: ev.dDurationMs ?? 0, text: inner })
+        texts.push(inner)
+      }
+      if (segs.length) {
+        console.log("[transcript] JSON3 ok, segments:", segs.length)
+        return {
+          videoId, title: player?.videoDetails?.title ?? "", channel: player?.videoDetails?.author ?? "",
+          durationMs: 0, languageCode: track.languageCode, segments: segs, plainText: texts.join(" ")
+        }
+      }
+    } catch {}
   }
-  let capJson: any
+  // XML parse
   try {
-    capJson = JSON.parse(capText)
-  } catch (e) {
-    console.log("[transcript] cap JSON.parse err:", (e as Error).message)
-    return null
-  }
-
-  const evList: any[] = capJson?.events ?? []
-  const segments: TranscriptSegment[] = []
-  const texts: string[] = []
-  for (const ev of evList) {
-    const segs = ev.segs ?? []
-    const text = segs.map((s: any) => s.utf8 ?? "").join("").trim()
-    if (!text || text === "\n") continue
-    segments.push({
-      startMs: ev.tStartMs ?? 0,
-      durationMs: ev.dDurationMs ?? 0,
-      text
-    })
-    texts.push(text)
-  }
-  console.log("[transcript] segments count:", segments.length)
-  if (!segments.length) return null
-
-  return {
-    videoId,
-    title: player?.videoDetails?.title ?? "",
-    channel: player?.videoDetails?.author ?? "",
-    durationMs: player?.videoDetails?.lengthSeconds
-      ? Number(player.videoDetails.lengthSeconds) * 1000
-      : 0,
-    languageCode: track.languageCode,
-    segments,
-    plainText: texts.join(" ")
-  }
+    const segs = parseCaptionXml(capText)
+    if (segs.length) {
+      console.log("[transcript] XML ok, segments:", segs.length)
+      return {
+        videoId, title: player?.videoDetails?.title ?? "", channel: player?.videoDetails?.author ?? "",
+        durationMs: 0, languageCode: track.languageCode, segments: segs, plainText: segs.map(s => s.text).join(" ")
+      }
+    }
+  } catch {}
+  return await fetchTranscriptViaAPI(videoId)
 }
 
-export function chunkTranscript(
-  segments: TranscriptSegment[],
-  maxChars = 12000
-): TranscriptSegment[][] {
+/**
+ * 数据源 5：API 代理 fallback（server 端 InnerTube ANDROID client 拿 track URL）
+ */
+async function fetchTranscriptViaAPI(videoId: string): Promise<TranscriptResult | null> {
+  try {
+    console.log("[transcript] API proxy GET", `${API_BASE}/api/transcript?videoId=${videoId}`)
+    const r = await fetch(`${API_BASE}/api/transcript?videoId=${videoId}`, { credentials: "omit" })
+    if (!r.ok) return null
+    const j = await r.json()
+    if (j?.error) return null
+    const trackUrl = j.trackUrl
+    if (!trackUrl) return null
+    console.log("[transcript] API got trackUrl, fetching content")
+    const capRes = await fetch(trackUrl, { credentials: "include" })
+    if (!capRes.ok) return null
+    const capText = await capRes.text()
+    if (capText.trimStart().startsWith("{")) {
+      try {
+        const json = JSON.parse(capText)
+        const evList: any[] = json?.events ?? []
+        const segs: TranscriptSegment[] = []
+        const texts: string[] = []
+        for (const ev of evList) {
+          const inner = (ev.segs ?? []).map((s: any) => s.utf8 ?? "").join("").trim()
+          if (!inner || inner === "\n") continue
+          segs.push({ startMs: ev.tStartMs ?? 0, durationMs: ev.dDurationMs ?? 0, text: inner })
+          texts.push(inner)
+        }
+        if (segs.length) {
+          return { videoId, title: j.title, channel: j.channel, durationMs: 0, languageCode: j.languageCode, segments: segs, plainText: texts.join(" ") }
+        }
+      } catch {}
+    }
+    const segs = parseCaptionXml(capText)
+    if (segs.length) {
+      return { videoId, title: j.title, channel: j.channel, durationMs: 0, languageCode: j.languageCode, segments: segs, plainText: segs.map(s => s.text).join(" ") }
+    }
+  } catch (e) {
+    console.log("[transcript] API proxy err:", (e as Error).message?.slice(0, 100))
+  }
+  return null
+}
+
+export function chunkTranscript(segments: TranscriptSegment[], maxChars = 12000): TranscriptSegment[][] {
   const chunks: TranscriptSegment[][] = []
   let cur: TranscriptSegment[] = []
   let curLen = 0
-
   for (const seg of segments) {
     if (curLen + seg.text.length > maxChars && cur.length > 0) {
-      chunks.push(cur)
-      cur = []
-      curLen = 0
+      chunks.push(cur); cur = []; curLen = 0
     }
-    cur.push(seg)
-    curLen += seg.text.length + 1
+    cur.push(seg); curLen += seg.text.length + 1
   }
   if (cur.length > 0) chunks.push(cur)
   return chunks
