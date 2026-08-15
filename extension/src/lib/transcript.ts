@@ -232,53 +232,64 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
   }
   console.log("[transcript] track:", track.languageCode, track.kind ?? "?", "from:", source)
 
-  // 3. 直接 fetch timedtext URL（带 cookies 浏览器自动带 pot）
-  const sep = track.baseUrl.includes("?") ? "&" : "?"
-  const capUrl = `${track.baseUrl}${sep}fmt=json3`
-  let capRes: Response
-  try {
-    capRes = await fetch(capUrl, { credentials: "include" })
-  } catch (e) {
-    console.log("[transcript] direct fetch err:", (e as Error).message?.slice(0, 100))
-    return await fetchTranscriptViaAPI(videoId)
-  }
-  console.log("[transcript] direct capRes status:", capRes.status, "ct:", capRes.headers.get("content-type")?.slice(0, 40))
-  if (!capRes.ok) return await fetchTranscriptViaAPI(videoId)
+  // 3. 直接 fetch timedtext（带 cookies 浏览器自动带 pot）
+  //    YouTube 经常对 fmt=json3 吐 text/html（拦截页 / consent 页），
+  //    但 fmt=srv3（XML）走不同代码路径，有时能过。两手都试。
+  const baseText = track.baseUrl
+  const sep = baseText.includes("?") ? "&" : "?"
+  const candidates: Array<{ fmt: string; parse: (txt: string) => TranscriptSegment[] }> = [
+    {
+      fmt: "json3",
+      parse: (txt) => {
+        if (!txt.trimStart().startsWith("{")) return []
+        try {
+          const j = JSON.parse(txt)
+          const evList: any[] = j?.events ?? []
+          const out: TranscriptSegment[] = []
+          for (const ev of evList) {
+            const inner = (ev.segs ?? []).map((s: any) => s.utf8 ?? "").join("").trim()
+            if (!inner || inner === "\n") continue
+            out.push({ startMs: ev.tStartMs ?? 0, durationMs: ev.dDurationMs ?? 0, text: inner })
+          }
+          return out
+        } catch { return [] }
+      }
+    },
+    {
+      fmt: "srv3",
+      parse: (txt) => parseCaptionXml(txt)
+    }
+  ]
 
-  const capText = await capRes.text()
-  // 4. 优先解析 JSON3（fmt=json3），fallback XML
-  if (capText.trimStart().startsWith("{")) {
+  for (const cand of candidates) {
+    const capUrl = `${baseText}${sep}fmt=${cand.fmt}`
+    let capRes: Response
     try {
-      const j = JSON.parse(capText)
-      const evList: any[] = j?.events ?? []
-      const segs: TranscriptSegment[] = []
-      const texts: string[] = []
-      for (const ev of evList) {
-        const inner = (ev.segs ?? []).map((s: any) => s.utf8 ?? "").join("").trim()
-        if (!inner || inner === "\n") continue
-        segs.push({ startMs: ev.tStartMs ?? 0, durationMs: ev.dDurationMs ?? 0, text: inner })
-        texts.push(inner)
-      }
-      if (segs.length) {
-        console.log("[transcript] JSON3 ok, segments:", segs.length)
-        return {
-          videoId, title: player?.videoDetails?.title ?? "", channel: player?.videoDetails?.author ?? "",
-          durationMs: 0, languageCode: track.languageCode, segments: segs, plainText: texts.join(" ")
-        }
-      }
-    } catch {}
-  }
-  // XML parse
-  try {
-    const segs = parseCaptionXml(capText)
+      capRes = await fetch(capUrl, { credentials: "include" })
+    } catch (e) {
+      console.log(`[transcript] direct fetch (fmt=${cand.fmt}) err:`, (e as Error).message?.slice(0, 100))
+      continue
+    }
+    const ct = (capRes.headers.get("content-type") ?? "").slice(0, 40)
+    console.log(`[transcript] direct fmt=${cand.fmt} status:`, capRes.status, "ct:", ct)
+    if (!capRes.ok) continue
+    const capText = await capRes.text()
+    // 防御：YouTube 有时 200 OK 但吐 HTML（拦截页），这种格式根本不可能 parse 出 caption
+    if (ct.startsWith("text/html") || capText.trimStart().startsWith("<")) {
+      console.log(`[transcript] fmt=${cand.fmt} returned HTML (likely bot/consent page), trying next`)
+      continue
+    }
+    const segs = cand.parse(capText)
     if (segs.length) {
-      console.log("[transcript] XML ok, segments:", segs.length)
+      console.log(`[transcript] fmt=${cand.fmt} ok, segments:`, segs.length)
       return {
         videoId, title: player?.videoDetails?.title ?? "", channel: player?.videoDetails?.author ?? "",
-        durationMs: 0, languageCode: track.languageCode, segments: segs, plainText: segs.map(s => s.text).join(" ")
+        durationMs: 0, languageCode: track.languageCode, segments: segs,
+        plainText: segs.map(s => s.text).join(" ")
       }
     }
-  } catch {}
+  }
+  console.log("[transcript] all direct formats failed, falling back to API proxy")
   return await fetchTranscriptViaAPI(videoId)
 }
 

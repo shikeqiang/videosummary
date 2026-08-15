@@ -5,6 +5,60 @@ export const dynamic = "force-dynamic"
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0 Safari/537.36"
+const UA_ANDROID =
+  "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip"
+const UA_TV =
+  "Mozilla/5.0 (PlayStation; PlayStation 4/12.00) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Safari/605.1.15"
+const INNER_TUBE_KEY = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+
+/**
+ * InnerTube API 拿 player response
+ * 多 client 串行试：ANDROID（captions 字段通常保留）→ TVHTML5_SIMPLY_EMBEDDED_PLAYER（无 bot 检测）→ WEB
+ * 任一拿到 captionTracks 即返回
+ *
+ * 为什么不用 HTML scrape：服务端裸 curl 经常被 YouTube 当成 bot，
+ * 返回 consent 拦截页或裁剪过的 player response（captions 字段被剥离）。
+ * InnerTube 是它自己内部的 JSON API，对无 cookie / 无 pot 的请求更友好。
+ */
+async function getPlayerFromInnerTube(videoId: string): Promise<any | null> {
+  const url = `https://www.youtube.com/youtubei/v1/player?key=${INNER_TUBE_KEY}`
+  const clients = [
+    { name: "ANDROID", version: "19.09.37", ua: UA_ANDROID },
+    { name: "TVHTML5_SIMPLY_EMBEDDED_PLAYER", version: "2.0", ua: UA_TV },
+    { name: "WEB", version: "2.20240101.00.00", ua: UA },
+  ]
+  for (const c of clients) {
+    try {
+      const r = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": c.ua,
+          "X-Youtube-Client-Name": c.name,
+          "X-Youtube-Client-Version": c.version,
+        },
+        body: JSON.stringify({
+          videoId,
+          context: { client: { clientName: c.name, clientVersion: c.version, hl: "en" } }
+        })
+      })
+      if (!r.ok) {
+        console.log("[transcript-api] InnerTube", c.name, "status:", r.status)
+        continue
+      }
+      const p = await r.json()
+      const tracks = p?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+      if (tracks?.length) {
+        console.log("[transcript-api] InnerTube", c.name, "got tracks:", tracks.length)
+        return p
+      }
+      console.log("[transcript-api] InnerTube", c.name, "no captions, plStatus:", p?.playabilityStatus?.status)
+    } catch (e: any) {
+      console.log("[transcript-api] InnerTube", c.name, "err:", e?.message?.slice(0, 80))
+    }
+  }
+  return null
+}
 
 function extractPlayerResponse(html: string): any | null {
   const marker = "ytInitialPlayerResponse = "
@@ -42,18 +96,32 @@ export async function GET(req: NextRequest) {
 
   try {
     // 1) 拉 watch page HTML（拿全量 player response）
-    const watchRes = await fetch(
-      `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
-      { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" }, cache: "no-store" }
-    )
-    if (!watchRes.ok) return NextResponse.json({ error: "watch fetch failed", status: watchRes.status }, { status: 502 })
-    const html = await watchRes.text()
-    console.log("[transcript-api] html len:", html.length)
-    const player = extractPlayerResponse(html)
-    if (!player) return NextResponse.json({ error: "no player response" }, { status: 502 })
+    // 1) 拉 watch page HTML 拿 player response
+    let player: any | null = null
+    try {
+      const watchRes = await fetch(
+        `https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}&hl=en`,
+        { headers: { "User-Agent": UA, "Accept-Language": "en-US,en;q=0.9" }, cache: "no-store" }
+      )
+      if (watchRes.ok) {
+        const html = await watchRes.text()
+        console.log("[transcript-api] html len:", html.length)
+        player = extractPlayerResponse(html)
+      } else {
+        console.log("[transcript-api] watch fetch status:", watchRes.status)
+      }
+    } catch (e: any) {
+      console.log("[transcript-api] watch fetch err:", e?.message?.slice(0, 80))
+    }
 
-    // 2) 拿 caption tracks
-    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    // 2) HTML 拿不到 captions（被 bot 检测 / consent 拦截 / captions 字段被剥离）时，fallback InnerTube
+    let tracks: any[] | undefined = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    if (!tracks?.length) {
+      console.log("[transcript-api] HTML has no captions, falling back to InnerTube")
+      player = await getPlayerFromInnerTube(videoId)
+      tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks
+    }
+    if (!player) return NextResponse.json({ error: "no player response" }, { status: 502 })
     if (!tracks?.length) return NextResponse.json({ error: "no captions" }, { status: 404 })
     console.log("[transcript-api] tracks count:", tracks.length)
 
