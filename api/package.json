@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test:transcript-parser": "tsc --target ES2022 --module CommonJS --moduleResolution node --esModuleInterop --skipLibCheck --strict --typeRoots ./node_modules/@types --outDir ./.test-build ../scripts/test-transcript-parser.ts && node ./.test-build/test-transcript-parser.js"
   },
   "dependencies": {
     "@paddle/paddle-js": "^1.6.4",

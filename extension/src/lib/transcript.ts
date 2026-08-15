@@ -5,9 +5,12 @@
  *  1. 页面 script 提 playerResponse (ytInitialPlayerResponse)
  *  2. 直接 fetch track.baseUrl 拿 XML/srv3（带 cookies + 自动 pot）
  *  3. parseCaptionXml 支持两种格式
- *  4. 全失败 → fetch("/api/transcript?...") 代理 fallback
- *  5. 解析 proxy 返回的 trackUrl
+ *  4. 全失败 → fetch("/api/youtube/transcript?...") 服务端代理 fallback
+ *     （服务端 HTML scrape 拿 player response，再用 WEB client 头去 fetch timedtext）
+ *  5. 解析 proxy 返回的 segments（已经是文本）
  */
+
+import { ENV } from "./env"
 
 export interface TranscriptSegment {
   startMs: number
@@ -41,7 +44,7 @@ type YtPlayerResponse = {
   videoDetails?: { title?: string; author?: string; lengthSeconds?: string | number }
 }
 
-const API_BASE = (typeof process !== "undefined" && (process as any).env?.PLASMO_PUBLIC_API_BASE_URL) || "http://localhost:3000"
+const API_BASE = ENV.API_BASE_URL
 
 function getPlayerFromScript(): YtPlayerResponse | null {
   const w = window as any
@@ -280,46 +283,56 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
 }
 
 /**
- * 数据源 5：API 代理 fallback（server 端 InnerTube ANDROID client 拿 track URL）
+ * 数据源 5：API 代理 fallback（server 端 HTML scrape + WEB client 头去 fetch timedtext）
+ *
+ * 注意：调的是 /api/youtube/transcript（不是 /api/transcript），那个端点
+ *   会返回完整的 segments（已经是文本），不需要扩展端再 fetch trackUrl。
+ *
+ * manifest.json 必须把 API_BASE 加进 host_permissions，否则 Chrome 会 block 这个 fetch。
  */
 async function fetchTranscriptViaAPI(videoId: string): Promise<TranscriptResult | null> {
+  const url = `${API_BASE}/api/youtube/transcript?videoId=${encodeURIComponent(videoId)}`
+  console.log("[transcript] API proxy GET", url)
+  let r: Response
   try {
-    console.log("[transcript] API proxy GET", `${API_BASE}/api/transcript?videoId=${videoId}`)
-    const r = await fetch(`${API_BASE}/api/transcript?videoId=${videoId}`, { credentials: "omit" })
-    if (!r.ok) return null
-    const j = await r.json()
-    if (j?.error) return null
-    const trackUrl = j.trackUrl
-    if (!trackUrl) return null
-    console.log("[transcript] API got trackUrl, fetching content")
-    const capRes = await fetch(trackUrl, { credentials: "include" })
-    if (!capRes.ok) return null
-    const capText = await capRes.text()
-    if (capText.trimStart().startsWith("{")) {
-      try {
-        const json = JSON.parse(capText)
-        const evList: any[] = json?.events ?? []
-        const segs: TranscriptSegment[] = []
-        const texts: string[] = []
-        for (const ev of evList) {
-          const inner = (ev.segs ?? []).map((s: any) => s.utf8 ?? "").join("").trim()
-          if (!inner || inner === "\n") continue
-          segs.push({ startMs: ev.tStartMs ?? 0, durationMs: ev.dDurationMs ?? 0, text: inner })
-          texts.push(inner)
-        }
-        if (segs.length) {
-          return { videoId, title: j.title, channel: j.channel, durationMs: 0, languageCode: j.languageCode, segments: segs, plainText: texts.join(" ") }
-        }
-      } catch {}
-    }
-    const segs = parseCaptionXml(capText)
-    if (segs.length) {
-      return { videoId, title: j.title, channel: j.channel, durationMs: 0, languageCode: j.languageCode, segments: segs, plainText: segs.map(s => s.text).join(" ") }
-    }
+    r = await fetch(url, { credentials: "omit" })
   } catch (e) {
-    console.log("[transcript] API proxy err:", (e as Error).message?.slice(0, 100))
+    // Chrome 会在 host_permissions 没声明时 block 这个 fetch，抛 TypeError
+    console.log("[transcript] API proxy fetch threw:", (e as Error).message?.slice(0, 120))
+    return null
   }
-  return null
+  if (!r.ok) {
+    let body = ""
+    try { body = (await r.text()).slice(0, 200) } catch {}
+    console.log("[transcript] API proxy non-OK:", r.status, body)
+    return null
+  }
+  let j: any
+  try {
+    j = await r.json()
+  } catch (e) {
+    console.log("[transcript] API proxy JSON parse err:", (e as Error).message?.slice(0, 120))
+    return null
+  }
+  if (j?.error) {
+    console.log("[transcript] API proxy returned error:", j.error, j.message ?? "")
+    return null
+  }
+  const segs: TranscriptSegment[] = Array.isArray(j?.segments) ? j.segments : []
+  if (!segs.length) {
+    console.log("[transcript] API proxy returned 0 segments")
+    return null
+  }
+  console.log("[transcript] API proxy OK, segments:", segs.length)
+  return {
+    videoId,
+    title: j.title ?? "",
+    channel: j.channel ?? "",
+    durationMs: 0,
+    languageCode: j.languageCode ?? "",
+    segments: segs,
+    plainText: j.plainText ?? segs.map((s: any) => s.text).join(" ")
+  }
 }
 
 export function chunkTranscript(segments: TranscriptSegment[], maxChars = 12000): TranscriptSegment[][] {
