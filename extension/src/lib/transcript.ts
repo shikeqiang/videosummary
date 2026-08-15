@@ -11,6 +11,7 @@
  */
 
 import { ENV } from "./env"
+import { pageContextFetch } from "./page-fetch"
 
 export interface TranscriptSegment {
   startMs: number
@@ -263,23 +264,27 @@ export async function fetchTranscript(videoId: string): Promise<TranscriptResult
 
   for (const cand of candidates) {
     const capUrl = `${baseText}${sep}fmt=${cand.fmt}`
-    let capRes: Response
+    // 用 page-context fetch：让 fetch 在 YouTube 主线程跑，自动拿到 PoToken
+    // 否则 content script 直接 fetch 会被 YouTube 识别为 bot 返回 HTML 拦截页
+    let capRes: { ok: boolean; status: number; ct: string; text: string; error?: string }
     try {
-      capRes = await fetch(capUrl, { credentials: "include" })
+      capRes = await pageContextFetch(capUrl)
     } catch (e) {
       console.log(`[transcript] direct fetch (fmt=${cand.fmt}) err:`, (e as Error).message?.slice(0, 100))
       continue
     }
-    const ct = (capRes.headers.get("content-type") ?? "").slice(0, 40)
-    console.log(`[transcript] direct fmt=${cand.fmt} status:`, capRes.status, "ct:", ct)
+    if (capRes.error) {
+      console.log(`[transcript] direct fmt=${cand.fmt} pageFetch err:`, capRes.error)
+      continue
+    }
+    console.log(`[transcript] direct fmt=${cand.fmt} status:`, capRes.status, "ct:", capRes.ct.slice(0, 40))
     if (!capRes.ok) continue
-    const capText = await capRes.text()
     // 防御：YouTube 有时 200 OK 但吐 HTML（拦截页），这种格式根本不可能 parse 出 caption
-    if (ct.startsWith("text/html") || capText.trimStart().startsWith("<")) {
+    if (capRes.ct.startsWith("text/html") || capRes.text.trimStart().startsWith("<")) {
       console.log(`[transcript] fmt=${cand.fmt} returned HTML (likely bot/consent page), trying next`)
       continue
     }
-    const segs = cand.parse(capText)
+    const segs = cand.parse(capRes.text)
     if (segs.length) {
       console.log(`[transcript] fmt=${cand.fmt} ok, segments:`, segs.length)
       return {
